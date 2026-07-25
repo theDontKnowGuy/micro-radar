@@ -42,6 +42,9 @@ It:
 
 Check the voltage requirements of your exact display board before connecting power.
 
+> [!NOTE]
+> I do not have an ESP32-C3, so this fork has not been tested on one. The firmware compiles for the C3 and should theoretically work, but its single-core processor may be less smooth in dense scenes. The original combined C3/TFT module also requires its original display pin mapping.
+
 ## Wiring
 
 The pin assignment is defined in [`include/LGFX.h`](include/LGFX.h).
