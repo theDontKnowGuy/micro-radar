@@ -120,7 +120,31 @@ static const char CONFIG_HTML[] PROGMEM = R"(
 </html>
 )";
 
+void ConfigurationWebServer::EnsureDefaults() {
+    prefs.begin("config", false);
+
+    auto ensureKey = [this](const char* key, const char* defaultValue) {
+        const String current = prefs.getString(key, "__MISSING__");
+        if (current == "__MISSING__") {
+            prefs.putString(key, defaultValue);
+        }
+    };
+
+    ensureKey("latitude", "");
+    ensureKey("longitude", "");
+    ensureKey("radius", "1.0");
+    ensureKey("opensky-id", "");
+    ensureKey("opensky-secret", "");
+    ensureKey("scanline", "true");
+    ensureKey("infotext", "true");
+    ensureKey("triangle", "true");
+
+    prefs.end();
+}
+
 void ConfigurationWebServer::Initialise() {
+    EnsureDefaults();
+
     // start mDNS and check result
     if (!MDNS.begin("microradar")) {
         Serial.println("[WARN] Failed to start mDNS. Continuing without mDNS...");
@@ -131,7 +155,7 @@ void ConfigurationWebServer::Initialise() {
         Serial.println("[GET] Handling request to config web server...");
 
         // read all values up front so the processor lambda can capture by value
-        prefs.begin("config", true);
+        prefs.begin("config", false);
         const String latitude = prefs.getString("latitude", "");
         const String longitude = prefs.getString("longitude", "");
         const String radius = prefs.getString("radius", "1.0");
@@ -143,7 +167,9 @@ void ConfigurationWebServer::Initialise() {
         prefs.end();
 
         // mask secret before sending to client
-        std::fill(openskySecret.begin(), openskySecret.end(), '*');
+        for (size_t i = 0; i < openskySecret.length(); ++i) {
+            openskySecret[i] = '*';
+        }
 
         // template processor called once per %PLACEHOLDER% token found in CONFIG_HTML.
         AsyncWebServerResponse* response = request->beginResponse(
@@ -210,7 +236,8 @@ void ConfigurationWebServer::Initialise() {
 
 const String ConfigurationWebServer::GetStoredString(const char* key)
 {
-    prefs.begin("config", true);
+    EnsureDefaults();
+    prefs.begin("config", false);
     const String value = prefs.getString(key, "");
     prefs.end();
     return value;

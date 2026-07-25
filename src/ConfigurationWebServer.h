@@ -14,4 +14,6 @@ public:
 
     void Initialise();
     [[nodiscard]] const String GetStoredString(const char* key);
+private:
+    void EnsureDefaults();
 };
