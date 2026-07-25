@@ -981,6 +981,9 @@ void AircraftManager::SolveAircraftLabels(std::vector<RenderAircraft>& aircraft)
 
         const Segment leader = makeLeader(current, candidate);
         for (size_t otherIndex = 0; otherIndex < aircraft.size(); ++otherIndex) {
+            if (otherIndex == index)
+                continue;
+
             const auto& other = aircraft[otherIndex];
             const LabelBox marker = markerBox(other);
             const int markerArea = overlapArea(candidate, marker);
@@ -988,7 +991,7 @@ void AircraftManager::SolveAircraftLabels(std::vector<RenderAircraft>& aircraft)
                 ++cost.markerConflicts;
                 cost.markerOverlapArea += markerArea;
             }
-            if (otherIndex != index && segmentIntersectsBox(leader, marker))
+            if (segmentIntersectsBox(leader, marker))
                 ++cost.leaderMarkerCrossings;
         }
 
