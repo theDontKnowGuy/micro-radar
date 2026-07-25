@@ -77,9 +77,11 @@ void AircraftManager::Update()
     ConsumeNetworkResults();
 
     const unsigned long now = millis();
-    if (now - lastFetch >= fetchInterval &&
-        ScheduleNetworkJob(NetworkJobType::FetchAircraft))
+    if ((!hasScheduledFetch || now - lastFetch >= fetchInterval) &&
+        ScheduleNetworkJob(NetworkJobType::FetchAircraft)) {
         lastFetch = now;
+        hasScheduledFetch = true;
+    }
 
     ResolveNextDestination();
 }
@@ -672,6 +674,8 @@ void AircraftManager::SolveAircraftLabels(std::vector<RenderAircraft>& aircraft)
     if (aircraft.empty())
         return;
 
+    // Discrete candidate local search: iterated coordinate descent followed by
+    // pairwise 2-opt repair for crossed or ownership-swapped label pairs.
     const unsigned long now = millis();
 
     constexpr int LABEL_GAP = 8;
@@ -1201,20 +1205,6 @@ void AircraftManager::ResolveNextDestination()
         if (!tracked.visibleOnRadar || tracked.state.onGround ||
             tracked.state.callsign.isEmpty() || tracked.destinationLookupAttempted)
             continue;
-
-        bool hasSafeCallsignCharacter = false;
-        for (size_t i = 0; i < tracked.state.callsign.length(); ++i) {
-            const char c = tracked.state.callsign[i];
-            if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) {
-                hasSafeCallsignCharacter = true;
-                break;
-            }
-        }
-
-        if (!hasSafeCallsignCharacter) {
-            tracked.destinationLookupAttempted = true;
-            return;
-        }
 
         if (ScheduleNetworkJob(
                 NetworkJobType::ResolveDestination,

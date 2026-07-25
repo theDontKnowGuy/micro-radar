@@ -13,7 +13,7 @@ public:
     ConfigurationWebServer(int port) : server(port), prefs() {}
 
     void Initialise();
-    [[nodiscard]] const String GetStoredString(const char* key);
+    [[nodiscard]] String GetStoredString(const char* key);
 private:
     void EnsureDefaults();
 };

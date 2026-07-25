@@ -1,5 +1,4 @@
 #include <Arduino.h>
-#include <ArduinoJson.h>
 #include <WiFiManager.h>
 
 #include "LGFX.h"
@@ -9,8 +8,6 @@
 #include "OpenSkyAuthTokenHandler.h"
 #include "AircraftManager.h"
 #include "DrawHelpers.h"
-#include "models/Aircraft.h"
-#include "models/TrackedAircraft.h"
 
 // Optional hard-coded Wi-Fi credentials. Leave both blank to skip pre-baking them and use the setup hotspot instead.
 const char* preconfiguredWifiSsid = "";
@@ -27,7 +24,7 @@ ConfigurationWebServer configServer;
 HttpRequestManager http;
 OpenSkyAuthTokenHandler authHandler(http);
 
-AircraftManager aircraftManager(configServer, authHandler, http, tft);
+AircraftManager aircraftManager(configServer, authHandler, http);
 bool renderRadarSweep = true;
 unsigned long radarSweepPeriodMs = 5000;
 
@@ -39,8 +36,6 @@ void setup()
   // initialise LGFX + screen
   tft.init();
   tft.invertDisplay(true);
-  pinMode(3, OUTPUT);
-  digitalWrite(3, HIGH);
 
   backbuffer.setColorDepth(8);
   backbuffer.createSprite(SCREEN_SIZE, SCREEN_SIZE);

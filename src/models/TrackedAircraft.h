@@ -41,7 +41,8 @@ struct TrackedAircraft {
         : state(ac), lastSeen(now),
         blendFromLat(ac.latitude),
         blendFromLon(ac.longitude),
-        blendAlpha(1.0f) {
+        blendAlpha(1.0f),
+        lastTick(now) {
     }
 
     // subsequent update — blend from current visual position

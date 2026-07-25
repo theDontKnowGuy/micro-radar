@@ -1,6 +1,22 @@
 #include "ConfigurationWebServer.h"
 #include <ESPmDNS.h>
 
+static String EscapeHtmlAttribute(const String& value) {
+    String escaped;
+    escaped.reserve(value.length());
+    for (size_t i = 0; i < value.length(); ++i) {
+        switch (value[i]) {
+            case '&': escaped += F("&amp;"); break;
+            case '<': escaped += F("&lt;"); break;
+            case '>': escaped += F("&gt;"); break;
+            case '"': escaped += F("&quot;"); break;
+            case '\'': escaped += F("&#39;"); break;
+            default: escaped += value[i]; break;
+        }
+    }
+    return escaped;
+}
+
 // HTML stored in flash
 // %PLACEHOLDER% tokens are substituted at serve time by the template processor.
 // Do not put literal percent signs inside CONFIG_HTML (including CSS percentages),
@@ -433,9 +449,9 @@ static const char CONFIG_HTML[] PROGMEM = R"(
             }
         </style>
     </head>
-    <body class="font-mono bg-gray-900 text-green-500 min-h-screen text-md sm:text-sm">
+    <body>
         <fieldset class="config-panel">
-            <legend class="px-2">Configure Micro Radar</legend>
+            <legend>Configure Micro Radar</legend>
 
             <p class="config-intro">Set radar coverage, aircraft data, and display preferences.</p>
             <form id="cfg" action="/save" method="POST" class="config-form">
@@ -452,8 +468,7 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                             min="-90"
                             step="0.000001"
                             max="90"
-                            value='%LATITUDE%'
-                            class="border border-green-500 bg-gray-900 w-full px-3 py-2 text-lg sm:text-base">
+                            value='%LATITUDE%'>
                     </label>
 
                     <label class="field-row">
@@ -465,57 +480,53 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                             min="-180"
                             step="0.000001"
                             max="180"
-                            value='%LONGITUDE%'
-                            class="border border-green-500 bg-gray-900 w-full px-3 py-2 text-lg sm:text-base">
+                            value='%LONGITUDE%'>
                     </label>
                     </div>
 
                     <div class="location-action mt-3">
                     <button
                         id="use-location"
-                        type="button"
-                        class="border border-green-500 bg-green-950 px-3 py-2 cursor-pointer hover:bg-green-900">
+                        type="button">
                         Use my current location
                     </button>
-                    <span id="location-result" class="text-sm text-green-400" aria-live="polite"></span>
+                    <span id="location-result" class="text-sm" aria-live="polite"></span>
                     </div>
 
-                    <fieldset class="border border-green-800 p-3 mt-3">
-                    <legend class="px-2 text-green-400">Find a known place</legend>
+                    <fieldset class="mt-3">
+                    <legend>Find a known place</legend>
                     <div class="place-search">
                         <input
                             id="place-query"
                             type="search"
                             placeholder="Airport, city, landmark, or address"
-                            autocomplete="off"
-                            class="border border-green-500 bg-gray-900 w-full px-3 py-2 text-lg sm:text-base">
+                            autocomplete="off">
                         <button
                             id="search-places"
-                            type="button"
-                            class="border border-green-500 bg-green-950 px-3 py-2 cursor-pointer hover:bg-green-900">
+                            type="button">
                             Search
                         </button>
                         <select
                             id="place-results"
-                            class="place-results border border-green-700 bg-gray-900 px-2 py-2 text-green-400"
+                            class="place-results"
                             size="5"
                             hidden
                             aria-label="Place search results"></select>
                     </div>
-                    <div id="place-result" class="mt-2 text-sm text-green-400" aria-live="polite"></div>
-                    <div class="mt-2 text-xs text-green-700">
+                    <div id="place-result" class="mt-2 text-sm" aria-live="polite"></div>
+                    <div class="mt-2 text-xs">
                         Search data &copy;
                         <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener"
                            class="underline">OpenStreetMap contributors</a>
                     </div>
-                    <details class="mt-2 text-xs text-green-700">
-                        <summary class="cursor-pointer">Place search provider</summary>
+                    <details class="mt-2 text-xs">
+                        <summary>Place search provider</summary>
                         <input
                             id="geocoder-url"
                             name="geocoder-url"
                             value="%GEOCODER_URL%"
                             aria-label="Nominatim-compatible place search URL"
-                            class="mt-2 border border-green-800 bg-gray-900 w-full px-2 py-1">
+                            class="mt-2">
                     </details>
                     </fieldset>
 
@@ -527,8 +538,7 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                         min="0.000001"
                         step="0.000001"
                         max="2.499999"
-                        value='%RADIUS%'
-                        class="border border-green-500 bg-gray-900 w-full px-3 py-2 text-lg sm:text-base">
+                        value='%RADIUS%'>
                     </label>
                 </fieldset>
 
@@ -540,16 +550,19 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                     <span>Client ID:</span>
                     <input
                         name="opensky-id"
-                        value='%OPENSKY_ID%'
-                        class="border border-green-500 bg-gray-900 w-full px-3 py-2 text-lg sm:text-base">
+                        autocomplete="off"
+                        spellcheck="false"
+                        value='%OPENSKY_ID%'>
                     </label>
 
                     <label class="field-row">
                     <span>Client secret:</span>
                     <input
                         name="opensky-secret"
-                        value='%OPENSKY_SECRET%'
-                        class="border border-green-500 bg-gray-900 w-full px-3 py-2 text-lg sm:text-base">
+                        type="password"
+                        autocomplete="off"
+                        spellcheck="false"
+                        value='%OPENSKY_SECRET%'>
                     </label>
                     </div>
                 </fieldset>
@@ -851,10 +864,8 @@ void ConfigurationWebServer::EnsureDefaults() {
     prefs.begin("config", false);
 
     auto ensureKey = [this](const char* key, const char* defaultValue) {
-        const String current = prefs.getString(key, "__MISSING__");
-        if (current == "__MISSING__") {
+        if (!prefs.isKey(key))
             prefs.putString(key, defaultValue);
-        }
     };
 
     ensureKey("latitude", "");
@@ -865,15 +876,17 @@ void ConfigurationWebServer::EnsureDefaults() {
     ensureKey("geocoder-url", "https://nominatim.openstreetmap.org/search");
     ensureKey("scanline", "true");
     ensureKey("sweep-period", "5");
-    ensureKey("aircraft-marker", "radar");
+    if (!prefs.isKey("aircraft-marker")) {
+        const String marker = prefs.isKey("triangle")
+            ? (prefs.getString("triangle", "true") == "true" ? "triangle" : "dot")
+            : "radar";
+        prefs.putString("aircraft-marker", marker);
+    }
     ensureKey("speed", "true");
     ensureKey("speed-unit", "knots");
     ensureKey("altitude", "true");
     ensureKey("altitude-unit", "feet");
     ensureKey("destination", "false");
-    // Older firmware only understands triangle vs dot; dot is the closest
-    // fallback for the radar block if someone later downgrades.
-    ensureKey("triangle", "false");
 
     prefs.end();
 }
@@ -891,13 +904,15 @@ void ConfigurationWebServer::Initialise() {
         Serial.println("[GET] Handling request to config web server...");
 
         // read all values up front so the processor lambda can capture by value
-        prefs.begin("config", false);
-        const String latitude = prefs.getString("latitude", "");
-        const String longitude = prefs.getString("longitude", "");
-        const String radius = prefs.getString("radius", "1.0");
-        const String openskyClientId = prefs.getString("opensky-id", "");
+        prefs.begin("config", true);
+        const String latitude = EscapeHtmlAttribute(prefs.getString("latitude", ""));
+        const String longitude = EscapeHtmlAttribute(prefs.getString("longitude", ""));
+        const String radius = EscapeHtmlAttribute(prefs.getString("radius", "1.0"));
+        const String openskyClientId = EscapeHtmlAttribute(prefs.getString("opensky-id", ""));
         String openskySecret = prefs.getString("opensky-secret", "");
-        const String geocoderUrl = prefs.getString("geocoder-url", "https://nominatim.openstreetmap.org/search");
+        const String geocoderUrl = EscapeHtmlAttribute(
+            prefs.getString("geocoder-url", "https://nominatim.openstreetmap.org/search")
+        );
         const String scanlineEnabled = prefs.getString("scanline", "true");
         const String sweepPeriod = prefs.getString("sweep-period", "5");
         const String speedEnabled = prefs.getString("speed", "true");
@@ -987,12 +1002,8 @@ void ConfigurationWebServer::Initialise() {
         const auto* markerParam = request->getParam("aircraft-marker", true);
         if (markerParam != nullptr) {
             const String marker = markerParam->value();
-            if (marker == "radar" || marker == "triangle" || marker == "dot") {
+            if (marker == "radar" || marker == "triangle" || marker == "dot")
                 prefs.putString("aircraft-marker", marker);
-                // Keep the legacy key coherent for compatibility with older
-                // firmware versions that only understand triangle vs dot.
-                prefs.putString("triangle", marker == "triangle" ? "true" : "false");
-            }
         }
 
         const auto* param = request->getParam("opensky-secret", true);
@@ -1017,10 +1028,9 @@ void ConfigurationWebServer::Initialise() {
     server.begin();
 }
 
-const String ConfigurationWebServer::GetStoredString(const char* key)
+String ConfigurationWebServer::GetStoredString(const char* key)
 {
-    EnsureDefaults();
-    prefs.begin("config", false);
+    prefs.begin("config", true);
     const String value = prefs.getString(key, "");
     prefs.end();
     return value;

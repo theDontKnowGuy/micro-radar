@@ -66,7 +66,8 @@ private:
     AircraftMarkerStyle aircraftMarkerStyle = AircraftMarkerStyle::RadarVector;
 
     unsigned long fetchInterval = 0;
-    unsigned long lastFetch = 999999;
+    unsigned long lastFetch = 0;
+    bool hasScheduledFetch = false;
     unsigned long lastDestinationLookup = 0;
     unsigned long lastLabelLayout = 0;
     bool labelLayoutDirty = true;
@@ -96,7 +97,6 @@ private:
     ConfigurationWebServer& configServer;
     OpenSkyAuthTokenHandler& authHandler;
     HttpRequestManager& http;
-    LGFX& tft;
 
     void DrawRadarCircles(LGFX_Sprite& backbuffer) const;
     std::pair<int, int> ProjectCoordinateToScreen(float predLat, float predLon) const;
@@ -118,8 +118,8 @@ private:
     static void NetworkTaskEntry(void* context);
 
 public:
-    AircraftManager(ConfigurationWebServer& config, OpenSkyAuthTokenHandler& auth, HttpRequestManager& httpManager, LGFX& tftGfx)
-        : configServer(config), authHandler(auth), http(httpManager), tft(tftGfx)
+    AircraftManager(ConfigurationWebServer& config, OpenSkyAuthTokenHandler& auth, HttpRequestManager& httpManager)
+        : configServer(config), authHandler(auth), http(httpManager)
     {
     }
     ~AircraftManager() = default;
