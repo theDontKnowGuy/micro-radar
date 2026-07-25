@@ -28,6 +28,8 @@ HttpRequestManager http;
 OpenSkyAuthTokenHandler authHandler(http);
 
 AircraftManager aircraftManager(configServer, authHandler, http, tft);
+bool renderRadarSweep = true;
+unsigned long radarSweepPeriodMs = 5000;
 
 void setup()
 {
@@ -62,27 +64,67 @@ void setup()
 
   // initialise aircraft manager
   aircraftManager.Initialise();
+
+  // Read display configuration once. Reading Preferences in every frame
+  // causes visible NVS-related frame-time spikes.
+  const String scanlineSetting = configServer.GetStoredString("scanline");
+  renderRadarSweep = scanlineSetting.isEmpty() || scanlineSetting == "true";
+  long sweepPeriodSeconds = configServer.GetStoredString("sweep-period").toInt();
+  if (sweepPeriodSeconds < 2 || sweepPeriodSeconds > 60)
+    sweepPeriodSeconds = 5;
+  radarSweepPeriodMs = static_cast<unsigned long>(sweepPeriodSeconds) * 1000UL;
 }
 
 void loop()
 {
   aircraftManager.Update();
 
+  // Keep presentation cadence stable even when the rest of the loop completes
+  // at slightly different speeds. Network work runs in AircraftManager's
+  // background task and no longer blocks this schedule.
+  constexpr unsigned long FRAME_INTERVAL_MS = 33; // approximately 30 FPS
+  static unsigned long lastFrameAt = 0;
+  const unsigned long now = millis();
+  if (now - lastFrameAt < FRAME_INTERVAL_MS) {
+    delay(1);
+    return;
+  }
+  lastFrameAt = now;
+
   // draw cycle
   backbuffer.fillScreen(lgfx::color888(0, 0, 0));
 
-  String renderScanlines = configServer.GetStoredString("scanline");
-  if (renderScanlines.isEmpty() || renderScanlines == "true") {
+  float sweepAngle = 0.0f;
+  float sweepUpdateAngle = 0.0f;
+  if (renderRadarSweep) {
+    constexpr int SWEEP_THICKNESS = 20;
+    constexpr int SWEEP_SPACING = 5;
+    sweepAngle = (now % radarSweepPeriodMs) * (TWO_PI / radarSweepPeriodMs);
     DrawScanLines(backbuffer,
       SCREEN_SIZE_DIV_2 - 1,
       SCREEN_SIZE_DIV_2 - 1,
-      SCREEN_SIZE_DIV_2 - 1 + (std::cos(millis() / 3000.0f) * SCREEN_SIZE_DIV_2),
-      SCREEN_SIZE_DIV_2 - 1 + (std::sin(millis() / 3000.0f) * SCREEN_SIZE_DIV_2),
-      20, 128, 5
+      SCREEN_SIZE_DIV_2 - 1 + (std::cos(sweepAngle) * SCREEN_SIZE_DIV_2),
+      SCREEN_SIZE_DIV_2 - 1 + (std::sin(sweepAngle) * SCREEN_SIZE_DIV_2),
+      SWEEP_THICKNESS, 128, SWEEP_SPACING
     );
+
+    // DrawScanLines makes its brightest leading edge by offsetting the final
+    // ray perpendicular to the base angle. Use that same edge to reveal and
+    // advance aircraft, so the visual crossing and data update coincide.
+    static const float SWEEP_LEADING_EDGE_OFFSET = std::atan2(
+      static_cast<float>(SWEEP_THICKNESS * SWEEP_SPACING),
+      static_cast<float>(SCREEN_SIZE_DIV_2)
+    );
+    sweepUpdateAngle = sweepAngle + SWEEP_LEADING_EDGE_OFFSET;
+    if (sweepUpdateAngle >= TWO_PI)
+      sweepUpdateAngle -= TWO_PI;
   }
 
-  aircraftManager.Draw(backbuffer);
+  aircraftManager.Draw(
+    backbuffer,
+    sweepUpdateAngle,
+    renderRadarSweep,
+    radarSweepPeriodMs
+  );
   backbuffer.pushSprite(0, 0);
 }
-

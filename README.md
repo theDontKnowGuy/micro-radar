@@ -1,233 +1,224 @@
-<h1 align=center>
-  📡 Micro Radar
-</h1>
-<h6 align=center>
-  a tiny open-source flight radar for your desk
-</h6>
-<p align=center>
-  <img src="https://github.com/user-attachments/assets/2ccb2063-d15c-4180-8e3c-ae3a81c814ff" alt="drawing" width="400"/>
-</p>
-<p align=center>
-  <a href="#prerequisites">PREREQUISITES</a> - <a href="#assembly">ASSEMBLY</a> - <a href="#usage">USAGE</a> - <a href="#faq">FAQ</a>
-</p>
+# 📡 Micro Radar — ESP32-S3 fork
 
-## Prerequisites
+A tiny, open-source live flight radar for a 1.28-inch round display.
 
-At the core of this project is the ESP32-C3 module with an integrated 240x240 IPS screen. No soldering required. The module does all the heavy lifting.
+> [!IMPORTANT]
+> This repository is a fork of [Anthony Sturdy's original Micro Radar project](https://github.com/AnthonySturdy/micro-radar). Full credit goes to Anthony for the original idea, design, firmware, enclosure, and the great work that made this project possible.
 
-I used dark grey PLA filament for the print, but any colour will work just fine. For the lens (optional but recommended), you'll need clear-drying epoxy to secure it (not super glue, which will fog up the lens. Ask me how I know.)
+I made this fork because I did not have the combined ESP32-C3 and TFT module used by the original project. My build uses an **ESP32-S3 development board and a separate 1.28-inch, 240 × 240 GC9A01 round TFT**. I then adapted the firmware for that hardware and expanded the radar display, configuration interface, and runtime behaviour.
 
-### Tools you'll need
+## Contents
 
-- Small screwdriver (for M2 screws)
-- Soldering iron (for setting the threaded inserts)
+- [How this fork differs](#how-this-fork-differs)
+- [Hardware](#hardware)
+- [Wiring](#wiring)
+- [Build and upload](#build-and-upload)
+- [First-time setup](#first-time-setup)
+- [Configuration](#configuration)
+- [Data sources and privacy](#data-sources-and-privacy)
+- [Original enclosure files](#original-enclosure-files)
+- [Troubleshooting](#troubleshooting)
+- [Credits and licence](#credits-and-licence)
 
-Set up a clean, organised workspace before you start. You'll be handling small components and epoxy, so a dedicated area helps. Keep a damp cloth nearby for cleaning if needed, and ensure your soldering iron has adequate ventilation.
+## How this fork differs
 
-### Shopping List
+### Different hardware
 
-Everything you need is below. I've linked products I used and recommend for ease of build, though alternatives exist on Amazon and elsewhere. If you deviate from this hardware, you may need to modify the enclosure and/or code.
+- Ported from the original combined **ESP32-C3 + integrated TFT module** to an **ESP32-S3 DevKitM-1 + separate GC9A01 TFT**.
+- Added the SPI pin mapping required by the separate display.
+- Enabled native USB CDC support for the ESP32-S3.
+- Removed machine-specific upload and monitor ports so PlatformIO can detect the connected board.
+- Pinned the PlatformIO platform and library versions for more repeatable builds.
 
-- [ ] [1.28" Round GC9A01 240x240 IPS Display Module with ESP32-C3 (no-touch)](https://www.aliexpress.com/item/1005008482665220.html)
-- [ ] [USB-C Ribbon Extension Cable (5cm, CMUP-CFPCB-BK)](https://www.aliexpress.com/item/1005005371248824.html)
-- [ ] [M2 Heat-set Threaded Inserts (+ soldering iron)](https://www.aliexpress.com/item/1005008493831823.html)
-- [ ] [32.5mm Round Mineral Glass Lens (optional, recommended)](https://www.aliexpress.com/item/1005004783554496.html)
-- [ ] [Gorilla Epoxy (necessary for fitting lens, useful anyway)](https://www.amazon.co.uk/Gorilla-Glue-25ml-Epoxy/dp/B009NQQJFC)
+### Smoother radar operation
 
-### Accounts / API
+- Network requests, route lookups, and label layout work run in a background FreeRTOS task instead of blocking the display loop.
+- The display is rendered at a steady target of approximately 30 frames per second.
+- New OpenSky snapshots are queued and revealed as the radar beam reaches each aircraft. Targets no longer all jump at the same instant.
+- Aircraft positions remain latched between sweeps while the existing prediction and interpolation logic keeps movement natural.
+- The radar sweep speed is configurable: 2, 5, 10, 18, or 30 seconds per revolution.
+- Aircraft outside the usable circular display area are culled so their symbols and labels do not appear through the bezel.
 
-This project uses OpenSky's API for retrieving flight data.
+### Clearer aircraft presentation
 
-I highly recommend making an account, as it's free, and allows the radar to make many more requests per day (400 -> 4000), which makes the live view much more accurate. However, it isn't necessary if you prefer.
+- Three selectable target symbols:
+  - radar block with heading vector;
+  - directional triangle;
+  - simple dot.
+- Callsigns are always displayed and surrounding whitespace from the API is removed.
+- Speed and altitude can be enabled independently.
+- Speed can be displayed in knots or metres per second.
+- Altitude can be displayed in metres or compact aviation-style feet.
+- Optional best-effort route labels show `ORIGIN-DESTINATION` when ADSBDB has a match.
+- A global label-placement solver reduces label/marker overlap, keeps labels on-screen, avoids crossing leader lines, and keeps placements stable to reduce visual jumping.
+- Leader lines connect displaced labels to the correct aircraft.
 
-You can sign up [here](https://opensky-network.org), or search "OpenSky".
+### Better configuration
 
-Further info on what to do with the account is in the usage section.
+- Redesigned responsive configuration page with grouped radar and aircraft-label settings.
+- Added precise browser geolocation where the browser allows it.
+- Added approximate IP-based location as a fallback for the device's normal local HTTP page.
+- Added place, airport, landmark, and address search using a configurable Nominatim-compatible provider.
+- Added safe defaults for new and existing installations without overwriting saved settings.
+- OpenSky secrets remain masked when the configuration page is loaded and are not replaced by the masked value when other settings are saved.
 
-## Assembly
+## Hardware
 
-Once you've got all the parts, assembly typically takes 1-2 hours (excluding print time).
+This fork is configured for:
 
-**I strongly recommend reading the [Usage](#usage) section before you start assembly.** It'll help with troubleshooting if anything goes wrong. You might want to test the firmware and your hardware before closing everything up.
+- ESP32-S3 DevKitM-1;
+- separate 1.28-inch round 240 × 240 GC9A01 SPI TFT, without touch;
+- USB data cable;
+- jumper wires or a soldered connection between the board and display;
+- a suitable enclosure or stand.
 
-### Step 1: 3D Print
+The ESP32-S3 and display do not need to be sold as one combined module. Check the voltage requirements printed on your particular display board before connecting power.
 
-<img width="400" alt="FFCBBECA-6165-4138-8C84-16AB375511A2_1_105_c" src="https://github.com/user-attachments/assets/21c0753c-7d7c-425c-bdf6-0df037a8fdaa" />
+## Wiring
 
-Print all four STLs from `./hardware/stl/`:
+The current pin assignment is defined in [`include/LGFX.h`](include/LGFX.h).
 
-- Main enclosure
-- Front plate
-- Bezel
-- 2 spacers
+| GC9A01 display pin | ESP32-S3 connection | Notes |
+|---|---:|---|
+| `GND` | `GND` | Common ground |
+| `VCC` | Per display specification | Use 3.3 V when required by the module; do not assume every breakout accepts the same supply |
+| `SCL` / `SCLK` | GPIO 11 | SPI clock |
+| `SDA` / `MOSI` | GPIO 12 | SPI data from ESP32-S3 to display |
+| `DC` | GPIO 2 | Data/command |
+| `CS` | GPIO 13 | Chip select |
+| `RST` / `RES` | Not controlled by firmware | LovyanGFX is configured with reset pin `-1`; the module must handle reset or be wired appropriately |
+| `BL` / `LED` | Not controlled by firmware | LovyanGFX is configured with backlight pin `-1`; power it as required by the module |
 
-### Step 2: Heat-set Threaded Inserts
+There is no MISO connection because the display is write-only in this build.
 
-**You'll need:** Soldering iron, M2 threaded inserts
+If you use different GPIO pins, update the values in `include/LGFX.h` before compiling. Avoid connecting a display supply or backlight pin until you have checked the specifications for your exact breakout board.
 
-Start with the front plate: insert 2mm M2 threaded inserts into the larger holes using the soldering iron.
+## Build and upload
 
-<img width="400" alt="IMG_7882" src="https://github.com/user-attachments/assets/defcfb2c-cdff-4bf1-84b9-7fceeefb0caf" />
+The project uses [PlatformIO](https://platformio.org/) and is configured by `platformio.ini`.
 
-Next, the two spacers. These might warp slightly, that's fine. Insert 6mm M2 inserts into each.
+1. Install [Visual Studio Code](https://code.visualstudio.com/) and the [PlatformIO IDE extension](https://platformio.org/install/ide?install=vscode).
+2. Clone or download this repository and open its root folder in VS Code.
+3. Connect the ESP32-S3 using a USB cable that supports data.
+4. Let PlatformIO install the pinned dependencies.
+5. Run **PlatformIO: Upload**, or use the upload arrow in the VS Code status bar.
+6. Open the serial monitor at `115200` baud if you need startup or network diagnostics.
 
-<img width="400" alt="IMG_7887" src="https://github.com/user-attachments/assets/73b95049-5f12-4e2b-983a-5242c05f9106" />
+If uploading does not start, hold **BOOT**, briefly press **RESET**, start the upload, and release **BOOT** when PlatformIO begins connecting. The exact sequence can vary between ESP32-S3 boards.
 
-Finally, the main enclosure. Insert 5mm M2 inserts.
+The firmware is compiled as GNU++17 and uses the `huge_app.csv` partition layout.
 
-<img width="400" alt="IMG_7891" src="https://github.com/user-attachments/assets/e36f3eec-31b5-468e-8451-9c428eaf9c21" />
+## First-time setup
 
-Et voilà.
+On first boot, the radar creates a Wi-Fi access point named:
 
-<img width="400" alt="IMG_7896" src="https://github.com/user-attachments/assets/97337223-223c-4531-90e1-f511adfb3d66" />
+```text
+MicroRadar-Setup
+```
 
-### Step 3 (Optional): Fitting the Lens
+Connect to it from a phone or computer. The captive configuration page should open automatically; if it does not, open the sign-in notification or browse to the gateway page offered by the device. Enter the Wi-Fi credentials and save them. The ESP32-S3 will restart and join that network.
 
-<img width="400" alt="IMG_7902" src="https://github.com/user-attachments/assets/e555f787-ca87-4558-b1eb-107f9071f96e" />
+After it connects, open:
 
-**You'll need:** Clear-drying epoxy, small applicator (match or cocktail stick works)
+```text
+http://microradar.local
+```
 
-This is the fiddliest bit. Keep it neat and you'll avoid frustration:
+The computer or phone must be on the same local network. If mDNS is unavailable on the network, find the ESP32-S3's IP address in the serial monitor or router and open that address directly.
 
-- Apply epoxy to the front plate, not the lens
-- Lower the front plate onto the lens (easier to manage excess epoxy)
-- Have a cleaner ready for the edges (I used nail polish remover, your mileage may vary)
-- Less is more with epoxy
-- Work on a surface that won't bond to epoxy
+## Configuration
 
-<img width="400" alt="IMG_7911" src="https://github.com/user-attachments/assets/aa497389-efd5-45c3-84dc-c997232889ac" />
+Saving the configuration restarts the radar so all settings take effect.
 
-Let the epoxy cure according to its label before moving on.
+### Location and range
 
-### Step 4: Bezel
+- **Latitude and longitude** set the centre of the radar.
+- **Radar radius** controls the displayed area in degrees.
+- **Use my current location** uses precise browser geolocation when the page is in a secure context.
+- On normal local HTTP, **Use approximate location** estimates coordinates from the public IP address.
+- **Place search** finds an airport, city, landmark, or address and fills its coordinates.
+- **Geocoder provider URL** can point to a compatible Nominatim service.
 
-**You'll need:** 2x5mm M2 screws, 2x10mm M2 screws
+### OpenSky
 
-Secure the bezel to the front plate using 2x5mm M2 screws through the threaded inserts you added earlier.
+The radar works anonymously, but an [OpenSky Network](https://opensky-network.org/) account is recommended because authenticated access has a larger request allowance. Enter the OpenSky client ID and client secret on the configuration page.
 
-<img width="400" alt="IMG_7914" src="https://github.com/user-attachments/assets/37a3502a-83e1-4552-a399-9a914e0ec973" />
+The firmware calculates its polling interval from the anonymous or authenticated daily request allowance and leaves a small token buffer to reduce the chance of exhausting it.
 
-Screw 2x10mm M2 screws through the remaining two holes. They should protrude from the back.
+### Radar appearance
 
-<img width="400" alt="IMG_7915" src="https://github.com/user-attachments/assets/9ccfe5f2-347d-4563-a2b1-eb5e65e1d83f" />
+- Enable or disable the animated sweep.
+- Select a sweep period of 2, 5, 10, 18, or 30 seconds.
+- Select a radar block and vector, aircraft triangle, or simple dot.
 
-Peel the protective film off the screen and position it over the lens. The screws you just inserted will guide the display into place.
+### Aircraft labels
 
-Before clamping it down with the spacers, **make sure the antenna is attached to the module**. Press it down firmly onto the flat surface until it clicks. Orientation doesn't matter, but you do need this connection otherwise you won't get any WiFi signal.
+- Callsigns are always shown.
+- Speed is optional and can use knots (`kt`) or metres per second (`m/s`).
+- Altitude is optional and can use metres or compact feet, for example `456ft`, `3.4Kft`, or `14Kft`.
+- Route is optional and is displayed only when a match is available.
 
-<img width="400" alt="IMG_7917" src="https://github.com/user-attachments/assets/ee53aac0-d119-4941-a814-f7ef23ffe7a0" />
+## Data sources and privacy
 
-<img width="400" alt="IMG_7920" src="https://github.com/user-attachments/assets/0d4d7d86-9787-4972-aa55-8ae43c9a078b" />
+This firmware can contact the following services:
 
-Now screw the spacers into those protruding screws to clamp the module in place. I recommend keeping the board plugged in at this point to help with alignment. Don't use much force, too much pressure will stress the screen.
+- [OpenSky Network](https://opensky-network.org/) for live aircraft state vectors;
+- [ADSBDB](https://www.adsbdb.com/) for optional callsign-to-route lookup;
+- [OpenStreetMap Nominatim](https://nominatim.org/) or the configured compatible provider when place search is used;
+- [IPWhoIs](https://ipwhois.io/) when approximate location is requested;
+- jsDelivr when the browser loads the configuration page's Tailwind CSS script.
 
-Once you're happy with the alignment, you can add a small amount of epoxy around the module to lock it in place permanently (optional, but recommended if you're happy with the build).
+Precise browser location is used to fill the form in the browser. Approximate IP location and place search send a request to their respective public services. A VPN, mobile carrier, or distant ISP gateway can make IP-based coordinates inaccurate. Route data is best-effort and can be unavailable, stale, or ambiguous.
 
-### Step 5: Final Assembly
+## Original enclosure files
 
-**You'll need:** USB-C ribbon extension cable, 4x7mm M2 screws, optional rubber feet
+The `hardware/` directory is retained from the upstream project and includes STL, 3MF, and Onshape resources created for the original combined ESP32-C3/TFT module.
 
-Attach the USB-C ribbon cable to the case with the provided nuts and bolts.
+Those parts may **not** fit an ESP32-S3 board and separate display without modification. They are included as a useful starting point and remain part of Anthony Sturdy's original work. Check all dimensions before printing or edit the design for your exact ESP32-S3, display breakout, USB connector, and mounting method.
 
-<img width="400" alt="IMG_7921" src="https://github.com/user-attachments/assets/f40a7943-c880-4718-9e69-c87a4f5d33aa" />
+Refer to the [original Micro Radar repository](https://github.com/AnthonySturdy/micro-radar) for the original integrated-board shopping list and detailed enclosure assembly instructions.
 
-<img width="400" alt="IMG_7923" src="https://github.com/user-attachments/assets/2daccb36-421f-4a3e-812a-51dae4444d4e" />
+## Troubleshooting
 
-If you like, remove the supports from the bottom and insert rubber feet.
+### The screen is blank
 
-<img width="400" alt="IMG_7924" src="https://github.com/user-attachments/assets/fdeb69f2-ec0d-441e-95ca-abd7523f7c61" />
+- Confirm that the display is a GC9A01 240 × 240 SPI model.
+- Recheck ground, power, GPIO 11 (`SCL`), GPIO 12 (`SDA`), GPIO 2 (`DC`), and GPIO 13 (`CS`).
+- Check whether the display's `RST` and `BL` pins must be tied high or supplied separately.
+- Verify the display voltage requirements before changing the power connection.
+- If colours are wrong, the display may require the RGB-order option in `include/LGFX.h`.
 
-Plug in the board, then attach the front plate using 4x7mm M2 screws.
+### The upload port is missing or busy
 
-<img width="400" alt="IMG_7925" src="https://github.com/user-attachments/assets/40da22d9-447d-4ad0-a500-02f862050e5c" />
+- Disconnect and reconnect the board, then restart VS Code.
+- Make sure the USB cable supports data.
+- Select the detected serial port in PlatformIO.
+- Close any other serial monitor that is using the port.
+- Try the BOOT/RESET upload sequence described above.
 
-Done!
+### `microradar.local` does not open
 
-<img width="400" alt="IMG_7930" src="https://github.com/user-attachments/assets/989fb56f-dacc-4bf5-a9ab-cb1311e534e4" />
+- Confirm that the radar and browser are on the same network.
+- Check the serial monitor for the connection status.
+- Find the device IP address in the router and use it instead.
+- Some guest networks isolate clients and block both direct access and mDNS.
 
-## Usage
+### No aircraft appear
 
-### Flashing the Firmware
+- Save valid latitude, longitude, and radius values.
+- Check that Wi-Fi has internet access.
+- Look at the serial monitor for OpenSky request or authentication errors.
+- Try anonymous access if the saved OpenSky credentials are incorrect.
+- Confirm that aircraft are currently inside the selected area.
 
-You'll need [VS Code](https://code.visualstudio.com/) with the [PlatformIO IDE extension](https://marketplace.visualstudio.com/items?itemName=platformio.platformio-ide) installed. Once installed, restart VS Code, open the repository folder, and dependencies will pull in automatically.
+### Place search, approximate location, or page styling does not work
 
-Plug the board in via USB-C, then hit the upload button (→) in the bottom status bar. If the board doesn't reboot with the new firmware automatically, hold the BOOT button on the back and press RESET once, then release BOOT.
+These features depend on public internet services. Check internet access, DNS, browser privacy blocking, and the configured geocoder URL. Coordinates can always be entered manually.
 
-The board should auto-detect, but if you hit an upload failure, check that the correct board is selected in the status bar. If it still won't upload, try:
+## Credits and licence
 
-- Disconnect and reconnect the USB cable
-- Check that your cable supports data transfer (some USB-C cables are charge-only)
-- Try a different USB port on your computer
+This is a fork of [Micro Radar](https://github.com/AnthonySturdy/micro-radar), originally designed and developed by [Anthony Sturdy](https://github.com/AnthonySturdy). Thank you to Anthony for the excellent original project and for releasing it as open source.
 
-Read more about PlatformIO [here](https://docs.platformio.org/en/latest/).
+The original project was inspired by [therealhacksaw's desk radar](https://www.instagram.com/therealhacksaw/).
 
-### First Boot
-
-On first boot, the radar broadcasts a WiFi hotspot called `MicroRadar-Setup`. Connect to it from your phone or laptop and a configuration page will appear automatically (or go to your browser if it doesn't). Enter your WiFi credentials and hit save. The board will restart and connect to your network.
-
-If the hotspot doesn't appear straight away, give it a moment. If it still hasn't appeared after 30 seconds, exit the WiFi settings on your device and go back in to force a refresh. It'll usually show up then.
-
-### Configuration
-
-Once connected to your network, the radar config is accessible at [http://microradar.local](http://microradar.local) from any device on the same network.
-
-Here you can set:
-
-- **Location** (latitude and longitude): the centre point of your radar
-- **Radar radius**: how wide the scan extends (in degrees, 2 degrees is the limit to avoid rate limiting)
-- **Display options**: independently toggle speed, altitude, and best-effort destination labels. Callsigns are always shown. Speed can use knots (`kt`) or metres per second. Altitude can use metres or aviation-style feet: `456ft` below 3,000 feet, `3.4Kft` below 10,000 feet, and `14Kft` from 10,000 feet upward.
-- **OpenSky credentials**: your client ID and secret (if you've made an account - again, highly recommend!)
-
-On a secure page, **Use my current location** fills latitude and longitude using precise browser geolocation after permission is granted. The ESP configuration page normally uses local HTTP, where browsers block precise geolocation without prompting. In that case the button becomes **Use approximate location** and uses the public [IPWhoIs](https://ipwhois.io/) service to estimate coordinates from the network's public IP address. This can be inaccurate when using a VPN, mobile carrier, or distant ISP gateway; coordinates can always be entered manually.
-
-You can also search for a known place such as an airport, city, landmark, or address and select the intended result to fill its coordinates. Place search uses the public [OpenStreetMap Nominatim](https://nominatim.org/) service only when the Search button is pressed. Searches are limited to one request per second and cached for the current browser session. The Nominatim-compatible provider URL is configurable on the page.
-
-Destination is not included in OpenSky's live state vectors. When enabled, Micro Radar looks up route information by callsign using the public [ADSBDB API](https://www.adsbdb.com/) and displays it as `ORIGIN-DESTINATION` (for example, `AMS-TLV`). Some callsigns have no matching route, and route results can occasionally be stale or ambiguous, so the route line is shown only when a match is available.
-
-<img width="400" alt="image" src="https://github.com/user-attachments/assets/45e6219c-2672-4197-baad-16ae08180b58" />
-
-If you've made an OpenSky account (which I highly recommend), you can find your credentials under your account settings at opensky-network.org. With authentication, you get 4000 requests per day instead of 400, making the live view much more accurate. Read more about the API [here](https://opensky-network.org).
-
-This configuration page is accessible anytime the device is connected to WiFi, so you can tweak settings whenever you want.
-
-That's it! Once you've configured everything, you should see a live view of all flights over your location. Enjoy :)
-
-<img width="400" alt="IMG_7935" src="https://github.com/user-attachments/assets/118b9a1c-c2c0-488d-b638-d8684a30b1d7" />
-
-## FAQ
-
-> the port is busy or doesn't exist
-
-Restart VS Code *after* plugging in the device. If VS Code was already open, it may default to a stale port from before the device was connected.
-
-If that doesn't work, look for the button with a small "Plug" icon on VS Code's bottom bar (it might say "auto", "cu.usbmodem101", or similar). Click it and select the option that shows your device's name.
-<br/><br/>
-
-> the 3D print failed
-
-If you're using a Bambu Lab printer, make sure you're opening the `.3mf` file, since it includes the correct print bed and settings.
-
-Using a different printer? Open an [Issue](../../issues) and I'll try to help where I can.
-<br/><br/>
-
-> `ModuleNotFoundError: No module named 'intelhex'` when building
-
-This appears to be a Windows-specific issue. Either of these should fix it:
-
-**Option A:**
-1. Open the PlatformIO terminal (PlatformIO sidebar → Miscellaneous → PlatformIO Core CLI)
-2. Run `pip install intelhex`
-3. Rebuild
-
-**Option B:**
-1. Open a new terminal in VS Code (Terminal → New Terminal)
-2. Run `python -m pip install intelhex`
-3. Rebuild
-
-## Notes
-
-> Designed and developed as part of a wedding present for a mate who loves aviation (congratulations to both him and his wife!)
-
-> Inspired by [therealhacksaw](https://www.instagram.com/therealhacksaw/)'s desk radar
-
-> Built with ♥︎ in London
+The project is distributed under the [MIT License](LICENSE). The original copyright and licence notice are retained.

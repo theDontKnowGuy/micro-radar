@@ -8,6 +8,27 @@ struct TrackedAircraft {
     String route;
     bool destinationLookupAttempted = false;
 
+    // Label placement is kept relative to the aircraft so small position
+    // changes do not make the label jump between otherwise equal choices.
+    int16_t labelOffsetX = 0;
+    int16_t labelOffsetY = 0;
+    bool hasLabelPlacement = false;
+    unsigned long lastLabelMove = 0;
+
+    // Network snapshots are revealed when the radar sweep reaches this
+    // aircraft instead of changing every target on the same frame.
+    Aircraft queuedState{};
+    unsigned long queuedStateReceivedAt = 0;
+    bool hasQueuedState = false;
+    bool queuedRemoval = false;
+    bool visibleOnRadar = true;
+    float radarDisplayLat = 0.0f;
+    float radarDisplayLon = 0.0f;
+    bool hasRadarDisplayPosition = false;
+    float radarSweepBearing = 0.0f;
+    bool hasRadarSweepBearing = false;
+    unsigned long lastRadarSweepUpdateAt = 0;
+
     // blending state
     float blendFromLat = 0.0f;
     float blendFromLon = 0.0f;
@@ -38,6 +59,40 @@ struct TrackedAircraft {
 
         state = newState;
         lastSeen = now;
+    }
+
+    void QueueUpdate(const Aircraft& newState, unsigned long now) {
+        queuedState = newState;
+        queuedStateReceivedAt = now;
+        hasQueuedState = true;
+        queuedRemoval = false;
+    }
+
+    bool ApplyQueuedUpdate() {
+        if (!hasQueuedState)
+            return false;
+
+        Update(queuedState, queuedStateReceivedAt);
+        hasQueuedState = false;
+        return true;
+    }
+
+    void QueueRemoval() {
+        hasQueuedState = false;
+        queuedRemoval = true;
+    }
+
+    void LatchRadarDisplayPosition() {
+        const auto [predictedLat, predictedLon] = PredictPosition();
+        radarDisplayLat = predictedLat;
+        radarDisplayLon = predictedLon;
+        hasRadarDisplayPosition = true;
+    }
+
+    std::pair<float, float> GetRadarDisplayPosition() const {
+        if (hasRadarDisplayPosition)
+            return { radarDisplayLat, radarDisplayLon };
+        return GetDisplayPosition();
     }
 
     void Tick() {
