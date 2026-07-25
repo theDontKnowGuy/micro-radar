@@ -15,11 +15,16 @@ private:
     double rad = 0.2;
     std::map<String, TrackedAircraft> trackedAircraft;
 
-    bool displayInfoText = true;
+    bool displaySpeed = true;
+    bool displaySpeedInKnots = true;
+    bool displayAltitude = true;
+    bool displayAltitudeInFeet = true;
+    bool displayDestination = false;
     bool displayTriangles = true;
 
     unsigned long fetchInterval = 0;
     unsigned long lastFetch = 999999;
+    unsigned long lastDestinationLookup = 0;
 
     ConfigurationWebServer& configServer;
     OpenSkyAuthTokenHandler& authHandler;
@@ -30,6 +35,7 @@ private:
     std::pair<int, int> ProjectCoordinateToScreen(float predLat, float predLon) const;
     void DrawAircraftInfo(LGFX_Sprite& backbuffer, int x, int y, const TrackedAircraft& tracked) const;
     void DrawAircraftTriangle(LGFX_Sprite& backbuffer, int x, int y, const TrackedAircraft& tracked) const;
+    void ResolveNextDestination();
 
 public:
     AircraftManager(ConfigurationWebServer& config, OpenSkyAuthTokenHandler& auth, HttpRequestManager& httpManager, LGFX& tftGfx)

@@ -7,6 +7,7 @@ namespace JsonParser {
 
         a.icao24 = state[0].isNull() ? "" : state[0].as<String>();
         a.callsign = state[1].isNull() ? "" : state[1].as<String>();
+        a.callsign.trim();
         a.originCountry = state[2].isNull() ? "" : state[2].as<String>();
         a.timePosition = state[3].isNull() ? 0 : state[3].as<long>();
         a.lastContact = state[4].isNull() ? 0 : state[4].as<long>();

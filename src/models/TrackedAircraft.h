@@ -5,6 +5,8 @@
 struct TrackedAircraft {
     Aircraft state;
     unsigned long lastSeen;
+    String route;
+    bool destinationLookupAttempted = false;
 
     // blending state
     float blendFromLat = 0.0f;
@@ -28,6 +30,11 @@ struct TrackedAircraft {
         blendFromLat = curLat;
         blendFromLon = curLon;
         blendAlpha = 0.0f;  // restart blend
+
+        if (state.callsign != newState.callsign) {
+            route = "";
+            destinationLookupAttempted = false;
+        }
 
         state = newState;
         lastSeen = now;

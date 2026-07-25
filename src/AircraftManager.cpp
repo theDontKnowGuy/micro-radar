@@ -13,9 +13,17 @@ void AircraftManager::Initialise()
     rad = configServer.GetStoredString("radius").toDouble();
 
     // configuration
-    const String renderText = configServer.GetStoredString("infotext");
+    const String renderSpeed = configServer.GetStoredString("speed");
+    const String speedUnit = configServer.GetStoredString("speed-unit");
+    const String renderAltitude = configServer.GetStoredString("altitude");
+    const String altitudeUnit = configServer.GetStoredString("altitude-unit");
+    const String renderDestination = configServer.GetStoredString("destination");
     const String renderTris = configServer.GetStoredString("triangle");
-    if (!renderText.isEmpty()) displayInfoText = renderText == "true" ? true : false;
+    if (!renderSpeed.isEmpty()) displaySpeed = renderSpeed == "true";
+    if (!speedUnit.isEmpty()) displaySpeedInKnots = speedUnit == "knots";
+    if (!renderAltitude.isEmpty()) displayAltitude = renderAltitude == "true";
+    if (!altitudeUnit.isEmpty()) displayAltitudeInFeet = altitudeUnit == "feet" || altitudeUnit == "kft";
+    if (!renderDestination.isEmpty()) displayDestination = renderDestination == "true";
     if (!renderTris.isEmpty()) displayTriangles = renderTris == "true" ? true : false;
 
     // calculate how often we can call OpenSky API before being rate limited
@@ -91,6 +99,8 @@ void AircraftManager::Update()
                 ++it;
         }
     }
+
+    ResolveNextDestination();
 }
 
 void AircraftManager::Draw(LGFX_Sprite& backbuffer)
@@ -104,8 +114,7 @@ void AircraftManager::Draw(LGFX_Sprite& backbuffer)
         auto [predLat, predLon] = tracked.GetDisplayPosition();
         auto [x, y] = ProjectCoordinateToScreen(predLat, predLon);
 
-        if (displayInfoText)
-            DrawAircraftInfo(backbuffer, x, y, tracked);
+        DrawAircraftInfo(backbuffer, x, y, tracked);
 
         if (displayTriangles)
             DrawAircraftTriangle(backbuffer, x, y, tracked);
@@ -141,12 +150,98 @@ std::pair<int, int> AircraftManager::ProjectCoordinateToScreen(float predLat, fl
 void AircraftManager::DrawAircraftInfo(LGFX_Sprite& backbuffer, int x, int y, const TrackedAircraft& tracked) const
 {
     const int lineHeight = tft.fontHeight() + 1;
+    int line = 0;
 
     backbuffer.setTextSize(1);
     backbuffer.setTextColor(lgfx::color888(0, 128, 0));
-    backbuffer.drawString(tracked.state.callsign, x + 5, y + 5);
-    backbuffer.drawString(String(tracked.state.velocity) + "m/s", x + 5, y + 5 + lineHeight);
-    backbuffer.drawString(String(tracked.state.baroAltitude) + "m", x + 5, y + 5 + lineHeight * 2);
+    backbuffer.drawString(tracked.state.callsign, x + 5, y + 5 + lineHeight * line++);
+
+    if (displaySpeed) {
+        String speedLabel;
+        if (displaySpeedInKnots) {
+            const float speedKnots = tracked.state.velocity * 1.94384f;
+            speedLabel = String(speedKnots, 0) + "kt";
+        } else {
+            speedLabel = String(tracked.state.velocity, 1) + "m/s";
+        }
+        backbuffer.drawString(speedLabel, x + 5, y + 5 + lineHeight * line++);
+    }
+
+    if (displayAltitude) {
+        String altitudeLabel;
+        if (displayAltitudeInFeet) {
+            const float altitudeFeet = tracked.state.baroAltitude * 3.28084f;
+            if (altitudeFeet < 3000.0f)
+                altitudeLabel = String(altitudeFeet, 0) + "ft";
+            else if (altitudeFeet < 10000.0f)
+                altitudeLabel = String(altitudeFeet / 1000.0f, 1) + "Kft";
+            else
+                altitudeLabel = String(altitudeFeet / 1000.0f, 0) + "Kft";
+        } else {
+            altitudeLabel = String(tracked.state.baroAltitude, 0) + "m";
+        }
+        backbuffer.drawString(altitudeLabel, x + 5, y + 5 + lineHeight * line++);
+    }
+
+    if (displayDestination && !tracked.route.isEmpty())
+        backbuffer.drawString(tracked.route, x + 5, y + 5 + lineHeight * line);
+}
+
+void AircraftManager::ResolveNextDestination()
+{
+    constexpr unsigned long LOOKUP_INTERVAL_MS = 1000;
+
+    if (!displayDestination)
+        return;
+
+    const unsigned long now = millis();
+    if (now - lastDestinationLookup < LOOKUP_INTERVAL_MS)
+        return;
+
+    for (auto& [icao, tracked] : trackedAircraft) {
+        if (tracked.state.onGround || tracked.state.callsign.isEmpty() || tracked.destinationLookupAttempted)
+            continue;
+
+        tracked.destinationLookupAttempted = true;
+        lastDestinationLookup = now;
+
+        String safeCallsign;
+        safeCallsign.reserve(tracked.state.callsign.length());
+        for (size_t i = 0; i < tracked.state.callsign.length(); ++i) {
+            const char c = tracked.state.callsign[i];
+            if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'))
+                safeCallsign += c;
+        }
+
+        if (safeCallsign.isEmpty())
+            return;
+
+        const HttpResult result = http.Get("https://api.adsbdb.com/v0/callsign/" + safeCallsign);
+        if (!result.success || result.statusCode < 200 || result.statusCode >= 300)
+            return;
+
+        JsonDocument doc;
+        if (deserializeJson(doc, result.response))
+            return;
+
+        const JsonVariant flightRoute = doc["response"]["flightroute"];
+        const JsonVariant origin = flightRoute["origin"];
+        const JsonVariant destination = flightRoute["destination"];
+        if (origin.isNull() || destination.isNull())
+            return;
+
+        String originCode = origin["iata_code"].as<String>();
+        if (originCode.isEmpty())
+            originCode = origin["icao_code"].as<String>();
+
+        String destinationCode = destination["iata_code"].as<String>();
+        if (destinationCode.isEmpty())
+            destinationCode = destination["icao_code"].as<String>();
+
+        if (!originCode.isEmpty() && !destinationCode.isEmpty())
+            tracked.route = originCode + "-" + destinationCode;
+        return;
+    }
 }
 
 void AircraftManager::DrawAircraftTriangle(LGFX_Sprite& backbuffer, int x, int y, const TrackedAircraft& tracked) const

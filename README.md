@@ -175,8 +175,14 @@ Here you can set:
 
 - **Location** (latitude and longitude): the centre point of your radar
 - **Radar radius**: how wide the scan extends (in degrees, 2 degrees is the limit to avoid rate limiting)
-- **Display options**: toggle visual elements
+- **Display options**: independently toggle speed, altitude, and best-effort destination labels. Callsigns are always shown. Speed can use knots (`kt`) or metres per second. Altitude can use metres or aviation-style feet: `456ft` below 3,000 feet, `3.4Kft` below 10,000 feet, and `14Kft` from 10,000 feet upward.
 - **OpenSky credentials**: your client ID and secret (if you've made an account - again, highly recommend!)
+
+On a secure page, **Use my current location** fills latitude and longitude using precise browser geolocation after permission is granted. The ESP configuration page normally uses local HTTP, where browsers block precise geolocation without prompting. In that case the button becomes **Use approximate location** and uses the public [IPWhoIs](https://ipwhois.io/) service to estimate coordinates from the network's public IP address. This can be inaccurate when using a VPN, mobile carrier, or distant ISP gateway; coordinates can always be entered manually.
+
+You can also search for a known place such as an airport, city, landmark, or address and select the intended result to fill its coordinates. Place search uses the public [OpenStreetMap Nominatim](https://nominatim.org/) service only when the Search button is pressed. Searches are limited to one request per second and cached for the current browser session. The Nominatim-compatible provider URL is configurable on the page.
+
+Destination is not included in OpenSky's live state vectors. When enabled, Micro Radar looks up route information by callsign using the public [ADSBDB API](https://www.adsbdb.com/) and displays it as `ORIGIN-DESTINATION` (for example, `AMS-TLV`). Some callsigns have no matching route, and route results can occasionally be stale or ambiguous, so the route line is shown only when a match is available.
 
 <img width="400" alt="image" src="https://github.com/user-attachments/assets/45e6219c-2672-4197-baad-16ae08180b58" />
 
