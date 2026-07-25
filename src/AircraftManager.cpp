@@ -675,18 +675,20 @@ void AircraftManager::SolveAircraftLabels(std::vector<RenderAircraft>& aircraft)
         return;
 
     // Discrete candidate local search: iterated coordinate descent followed by
-    // pairwise 2-opt repair for crossed or ownership-swapped label pairs.
+    // pairwise 2-opt repair for obstructed or ownership-swapped label pairs.
     const unsigned long now = millis();
 
     constexpr int LABEL_GAP = 8;
     const int MARKER_RADIUS = aircraftMarkerStyle == AircraftMarkerStyle::RadarVector ? 11 : 7;
     constexpr int RADAR_CENTRE = SCREEN_SIZE_DIV_2 - 1;
     constexpr int USABLE_RADIUS = SCREEN_SIZE_DIV_2 - 3;
-    constexpr uint8_t MAX_CANDIDATES = 25;
+    constexpr uint8_t MAX_CANDIDATES = 33;
     constexpr uint8_t GLOBAL_PASSES = 4;
     constexpr uint8_t PAIR_REPAIR_PASSES = 2;
-    constexpr uint8_t PAIR_CANDIDATES = 17;
-    constexpr int64_t LEADER_DISTANCE_WEIGHT = 24;
+    // Squared distance makes the far ring progressively more expensive. A
+    // pair of far leaders still costs less than a real crossing, but a small
+    // overlap in secondary text no longer sends a label across the screen.
+    constexpr int64_t LEADER_DISTANCE_WEIGHT = 64;
     constexpr int64_t SWITCH_PENALTY = 24000;
     constexpr int64_t SHORTER_LEADER_SWITCH_PENALTY = 12000;
     constexpr int64_t VERTICAL_SIDE_CHANGE_PENALTY = 36000;
@@ -701,8 +703,9 @@ void AircraftManager::SolveAircraftLabels(std::vector<RenderAircraft>& aircraft)
         int16_t y2;
     };
 
-    // Costs are compared lexicographically in the operational priority order:
-    // legibility and unambiguous ownership first, aesthetics and motion last.
+    // Screen containment and readable callsigns are hard priorities. The
+    // remaining visual defects share a weighted score so a tiny secondary
+    // overlap cannot force a disproportionately long leader.
     struct LayoutCost {
         int64_t outside = 0;
         int64_t callsignConflicts = 0;
@@ -732,17 +735,33 @@ void AircraftManager::SolveAircraftLabels(std::vector<RenderAircraft>& aircraft)
             preference += other.preference;
         }
 
+        int64_t VisualPenalty() const {
+            return
+                leaderMarkerCrossings * 900000 +
+                leaderCrossings * 750000 +
+                leaderLabelCrossings * 550000 +
+                markerConflicts * 500000 +
+                markerOverlapArea * 1200 +
+                labelConflicts * 90000 +
+                labelOverlapArea * 350 +
+                ownershipAmbiguity * 48 +
+                preference;
+        }
+
         bool IsBetterThan(const LayoutCost& other) const {
             if (outside != other.outside) return outside < other.outside;
             if (callsignConflicts != other.callsignConflicts) return callsignConflicts < other.callsignConflicts;
             if (callsignOverlapArea != other.callsignOverlapArea) return callsignOverlapArea < other.callsignOverlapArea;
+            const int64_t visualPenalty = VisualPenalty();
+            const int64_t otherVisualPenalty = other.VisualPenalty();
+            if (visualPenalty != otherVisualPenalty) return visualPenalty < otherVisualPenalty;
+            if (leaderMarkerCrossings != other.leaderMarkerCrossings) return leaderMarkerCrossings < other.leaderMarkerCrossings;
+            if (leaderCrossings != other.leaderCrossings) return leaderCrossings < other.leaderCrossings;
+            if (leaderLabelCrossings != other.leaderLabelCrossings) return leaderLabelCrossings < other.leaderLabelCrossings;
             if (markerConflicts != other.markerConflicts) return markerConflicts < other.markerConflicts;
             if (markerOverlapArea != other.markerOverlapArea) return markerOverlapArea < other.markerOverlapArea;
             if (labelConflicts != other.labelConflicts) return labelConflicts < other.labelConflicts;
             if (labelOverlapArea != other.labelOverlapArea) return labelOverlapArea < other.labelOverlapArea;
-            if (leaderCrossings != other.leaderCrossings) return leaderCrossings < other.leaderCrossings;
-            if (leaderLabelCrossings != other.leaderLabelCrossings) return leaderLabelCrossings < other.leaderLabelCrossings;
-            if (leaderMarkerCrossings != other.leaderMarkerCrossings) return leaderMarkerCrossings < other.leaderMarkerCrossings;
             if (ownershipAmbiguity != other.ownershipAmbiguity) return ownershipAmbiguity < other.ownershipAmbiguity;
             return preference < other.preference;
         }
@@ -859,7 +878,8 @@ void AircraftManager::SolveAircraftLabels(std::vector<RenderAircraft>& aircraft)
         { 1, 0 }, { -1, 0 }, { 0, -1 }, { 0, 1 },
         { 1, -1 }, { -1, -1 }, { 1, 1 }, { -1, 1 }
     };
-    static constexpr int8_t EXTRA_DISTANCE[3] = { 0, 14, 30 };
+    static constexpr int8_t TANGENTIAL_SHIFT[2] = { 14, 28 };
+    constexpr int RADIAL_FALLBACK_EXTRA = 18;
 
     for (size_t index = 0; index < aircraft.size(); ++index) {
         auto& current = aircraft[index];
@@ -890,26 +910,51 @@ void AircraftManager::SolveAircraftLabels(std::vector<RenderAircraft>& aircraft)
         if (current.tracked->hasLabelPlacement)
             addCandidate(previous.x, previous.y);
 
-        // Store all near candidates first, then medium and far rings. Pair
-        // repair can therefore use a bounded near/medium subset.
-        for (const int extra : EXTRA_DISTANCE) {
-            for (const auto& direction : DIRECTIONS) {
-                int left = current.x - current.label.width / 2;
-                int top = current.y - current.label.height / 2;
+        auto addDirectionalCandidate = [&](int horizontal, int vertical, int extra) {
+            int left = current.x - current.label.width / 2;
+            int top = current.y - current.label.height / 2;
 
-                if (direction[0] > 0)
-                    left = current.x + LABEL_GAP + extra;
-                else if (direction[0] < 0)
-                    left = current.x - LABEL_GAP - extra - current.label.width;
+            if (horizontal > 0)
+                left = current.x + LABEL_GAP + extra;
+            else if (horizontal < 0)
+                left = current.x - LABEL_GAP - extra - current.label.width;
 
-                if (direction[1] > 0)
-                    top = current.y + LABEL_GAP + extra;
-                else if (direction[1] < 0)
-                    top = current.y - LABEL_GAP - extra - current.label.height;
+            if (vertical > 0)
+                top = current.y + LABEL_GAP + extra;
+            else if (vertical < 0)
+                top = current.y - LABEL_GAP - extra - current.label.height;
 
-                addCandidate(left, top);
-            }
+            addCandidate(left, top);
+        };
+
+        // Start with the eight immediately adjacent positions.
+        for (const auto& direction : DIRECTIONS)
+            addDirectionalCandidate(direction[0], direction[1], 0);
+
+        // Slide along each side while retaining the minimum radial gap. These
+        // candidates separate crowded edge labels without long diagonal
+        // leaders; for most multi-line labels the leader remains only 8 px.
+        const int centredLeft = current.x - current.label.width / 2;
+        const int centredTop = current.y - current.label.height / 2;
+        for (const int shift : TANGENTIAL_SHIFT) {
+            addCandidate(current.x + LABEL_GAP, centredTop - shift);
+            addCandidate(current.x + LABEL_GAP, centredTop + shift);
+            addCandidate(current.x - LABEL_GAP - current.label.width, centredTop - shift);
+            addCandidate(current.x - LABEL_GAP - current.label.width, centredTop + shift);
+            addCandidate(centredLeft - shift, current.y - LABEL_GAP - current.label.height);
+            addCandidate(centredLeft + shift, current.y - LABEL_GAP - current.label.height);
+            addCandidate(centredLeft - shift, current.y + LABEL_GAP);
+            addCandidate(centredLeft + shift, current.y + LABEL_GAP);
         }
+
+        // Keep one modest radial ring as a fallback for genuinely blocked
+        // clusters. It replaces the old 30 px far ring.
+        for (const auto& direction : DIRECTIONS)
+            addDirectionalCandidate(
+                direction[0],
+                direction[1],
+                RADIAL_FALLBACK_EXTRA
+            );
 
         current.label = current.tracked->hasLabelPlacement ? previous : set.boxes[0];
     }
@@ -1072,30 +1117,35 @@ void AircraftManager::SolveAircraftLabels(std::vector<RenderAircraft>& aircraft)
 
     refineGlobally();
 
-    // A crossed pair can be a 2-opt trap: moving either label alone is worse
-    // because it temporarily occupies the other's slot. Search both labels'
-    // near/medium candidates together and commit the repair atomically.
+    // An obstructed pair can be a 2-opt trap: moving either label alone is
+    // worse because it temporarily occupies the other's slot. Search both
+    // labels' complete candidate sets and commit the repair atomically.
     for (uint8_t repairPass = 0; repairPass < PAIR_REPAIR_PASSES; ++repairPass) {
         bool repaired = false;
         for (size_t firstIndex = 0; firstIndex < aircraft.size(); ++firstIndex) {
             for (size_t secondIndex = firstIndex + 1; secondIndex < aircraft.size(); ++secondIndex) {
                 const Segment firstLeader = makeLeader(aircraft[firstIndex], aircraft[firstIndex].label);
                 const Segment secondLeader = makeLeader(aircraft[secondIndex], aircraft[secondIndex].label);
-                const bool leadersCross = segmentsIntersect(firstLeader, secondLeader);
+                const bool connectionIsObstructed =
+                    segmentsIntersect(firstLeader, secondLeader) ||
+                    segmentIntersectsBox(firstLeader, markerBox(aircraft[secondIndex])) ||
+                    segmentIntersectsBox(secondLeader, markerBox(aircraft[firstIndex])) ||
+                    segmentIntersectsBox(firstLeader, aircraft[secondIndex].label) ||
+                    segmentIntersectsBox(secondLeader, aircraft[firstIndex].label);
                 const bool ownershipIsSwapped =
                     centreDistanceSquared(aircraft[firstIndex].label, aircraft[secondIndex]) + 64 <
                         centreDistanceSquared(aircraft[firstIndex].label, aircraft[firstIndex]) &&
                     centreDistanceSquared(aircraft[secondIndex].label, aircraft[firstIndex]) + 64 <
                         centreDistanceSquared(aircraft[secondIndex].label, aircraft[secondIndex]);
-                if (!leadersCross && !ownershipIsSwapped)
+                if (!connectionIsObstructed && !ownershipIsSwapped)
                     continue;
 
                 LabelBox bestFirst = aircraft[firstIndex].label;
                 LabelBox bestSecond = aircraft[secondIndex].label;
                 LayoutCost bestCost = pairCost(firstIndex, bestFirst, secondIndex, bestSecond);
 
-                const uint8_t firstCount = std::min<uint8_t>(PAIR_CANDIDATES, candidates[firstIndex].count);
-                const uint8_t secondCount = std::min<uint8_t>(PAIR_CANDIDATES, candidates[secondIndex].count);
+                const uint8_t firstCount = candidates[firstIndex].count;
+                const uint8_t secondCount = candidates[secondIndex].count;
                 for (uint8_t firstOption = 0; firstOption <= firstCount; ++firstOption) {
                     const LabelBox& firstCandidate = firstOption == 0
                         ? aircraft[firstIndex].label

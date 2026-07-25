@@ -13,7 +13,7 @@ I built this version with an **ESP32-S3 and a separate 1.28-inch 240 × 240 GC9A
 
 Aircraft text now tries to avoid other labels, markers, and the screen edge—even when many aircraft are close together.
 
-The algorithm is a **discrete candidate local search**: it tests positions in eight directions at three distances, then uses iterated coordinate descent to minimize overlap, off-screen text, crossed leader lines, ambiguous ownership, distance, and movement. A pairwise 2-opt repair step handles crossed or swapped label pairs that single-label moves cannot fix.
+The algorithm is a **discrete candidate local search**: it tests adjacent positions, short tangential slides, and a radial fallback, then uses iterated coordinate descent to balance overlap, off-screen text, obstructed or crossed leader lines, distance, ownership, and movement. A pairwise 2-opt repair step handles connector conflicts or swapped label pairs that single-label moves cannot fix.
 
 It:
 

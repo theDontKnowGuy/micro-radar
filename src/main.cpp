@@ -57,6 +57,30 @@ void setup()
   // begin background server for configuration
   configServer.Initialise();
 
+  if (WiFi.status() == WL_CONNECTED) {
+    const String configurationUrl = String("http://") + WiFi.localIP().toString();
+    Serial.print("Configure me at ");
+    Serial.println(configurationUrl);
+
+    tft.fillScreen(lgfx::color888(0, 0, 0));
+    tft.setTextColor(lgfx::color888(0, 255, 0));
+    const int lineHeight = tft.fontHeight() + 10;
+    tft.drawCentreString(
+      "Configure me at",
+      SCREEN_SIZE / 2,
+      SCREEN_SIZE / 2 - lineHeight
+    );
+    tft.drawCentreString(
+      configurationUrl,
+      SCREEN_SIZE / 2,
+      SCREEN_SIZE / 2
+    );
+
+    // Keep the address visible long enough to read while the asynchronous
+    // configuration server is already available.
+    delay(4000);
+  }
+
   // initialise aircraft manager
   aircraftManager.Initialise();
 
