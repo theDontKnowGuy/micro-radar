@@ -89,6 +89,8 @@ If mDNS is unavailable, use the IP address shown by the serial monitor or router
 
 ## Configuration
 
+![Micro Radar configuration page](docs/images/configuration-page.png)
+
 The web page lets you set:
 
 - radar centre and radius;
