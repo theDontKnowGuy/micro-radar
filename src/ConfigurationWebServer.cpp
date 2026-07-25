@@ -608,6 +608,13 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                                     <option value="dot" %MARKER_DOT_SELECTED%>Simple dot</option>
                                 </select>
                             </div>
+
+                            <div class="display-option">
+                                <label class="display-toggle" for="wind">
+                                    <span>Show center surface wind</span>
+                                    <input id="wind" name="wind" type="checkbox" %WIND%>
+                                </label>
+                            </div>
                         </section>
 
                         <section class="display-group" aria-labelledby="aircraft-labels-title">
@@ -887,6 +894,7 @@ void ConfigurationWebServer::EnsureDefaults() {
     ensureKey("altitude", "true");
     ensureKey("altitude-unit", "feet");
     ensureKey("destination", "false");
+    ensureKey("wind", "false");
 
     prefs.end();
 }
@@ -920,6 +928,7 @@ void ConfigurationWebServer::Initialise() {
         const String altitudeEnabled = prefs.getString("altitude", "true");
         const String altitudeUnit = prefs.getString("altitude-unit", "feet");
         const String destinationEnabled = prefs.getString("destination", "false");
+        const String windEnabled = prefs.getString("wind", "false");
         const String aircraftMarker = prefs.getString("aircraft-marker", "radar");
         prefs.end();
 
@@ -932,7 +941,7 @@ void ConfigurationWebServer::Initialise() {
         AsyncWebServerResponse* response = request->beginResponse(
             200, "text/html",
             (const uint8_t*)CONFIG_HTML, sizeof(CONFIG_HTML) - 1,
-            [latitude, longitude, radius, openskyClientId, openskySecret, geocoderUrl, scanlineEnabled, sweepPeriod, speedEnabled, speedUnit, altitudeEnabled, altitudeUnit, destinationEnabled, aircraftMarker]
+            [latitude, longitude, radius, openskyClientId, openskySecret, geocoderUrl, scanlineEnabled, sweepPeriod, speedEnabled, speedUnit, altitudeEnabled, altitudeUnit, destinationEnabled, windEnabled, aircraftMarker]
             (const String& var) -> String {
                 if (var == "LATITUDE")       return latitude;
                 if (var == "LONGITUDE")      return longitude;
@@ -953,6 +962,7 @@ void ConfigurationWebServer::Initialise() {
                 if (var == "ALTITUDE_FEET_SELECTED") return altitudeUnit == "feet" || altitudeUnit == "kft" ? "selected" : "";
                 if (var == "ALTITUDE_METERS_SELECTED") return altitudeUnit == "meters" ? "selected" : "";
                 if (var == "DESTINATION")    return destinationEnabled == "true" ? "checked" : "";
+                if (var == "WIND")           return windEnabled == "true" ? "checked" : "";
                 if (var == "MARKER_RADAR_SELECTED") return aircraftMarker == "radar" ? "selected" : "";
                 if (var == "MARKER_TRIANGLE_SELECTED") return aircraftMarker == "triangle" ? "selected" : "";
                 if (var == "MARKER_DOT_SELECTED") return aircraftMarker == "dot" ? "selected" : "";
@@ -1018,6 +1028,7 @@ void ConfigurationWebServer::Initialise() {
         prefs.putString("speed", request->hasParam("speed", true) ? "true" : "false");
         prefs.putString("altitude", request->hasParam("altitude", true) ? "true" : "false");
         prefs.putString("destination", request->hasParam("destination", true) ? "true" : "false");
+        prefs.putString("wind", request->hasParam("wind", true) ? "true" : "false");
         prefs.end();
 
         request->send(200, "text/html", "Saved - restarting device...");

@@ -3,6 +3,13 @@
 constexpr int SCREEN_SIZE = 240;
 constexpr int SCREEN_SIZE_DIV_2 = (SCREEN_SIZE / 2);
 constexpr unsigned long LABEL_LAYOUT_INTERVAL_MS = 1000;
+constexpr unsigned long WIND_FETCH_INTERVAL_MS = 15UL * 60UL * 1000UL;
+constexpr unsigned long WIND_RETRY_INTERVAL_MS = 60UL * 1000UL;
+constexpr unsigned long WIND_STALE_INTERVAL_MS = 60UL * 60UL * 1000UL;
+constexpr int WIND_LABEL_WIDTH = 108;
+constexpr int WIND_LABEL_HEIGHT = 11;
+constexpr int WIND_LABEL_X = (SCREEN_SIZE - WIND_LABEL_WIDTH) / 2;
+constexpr int WIND_LABEL_Y = 16;
 
 #include <ArduinoJson.h>
 #include <algorithm>
@@ -22,12 +29,14 @@ void AircraftManager::Initialise()
     const String renderAltitude = configServer.GetStoredString("altitude");
     const String altitudeUnit = configServer.GetStoredString("altitude-unit");
     const String renderDestination = configServer.GetStoredString("destination");
+    const String renderWind = configServer.GetStoredString("wind");
     const String markerStyle = configServer.GetStoredString("aircraft-marker");
     if (!renderSpeed.isEmpty()) displaySpeed = renderSpeed == "true";
     if (!speedUnit.isEmpty()) displaySpeedInKnots = speedUnit == "knots";
     if (!renderAltitude.isEmpty()) displayAltitude = renderAltitude == "true";
     if (!altitudeUnit.isEmpty()) displayAltitudeInFeet = altitudeUnit == "feet" || altitudeUnit == "kft";
     if (!renderDestination.isEmpty()) displayDestination = renderDestination == "true";
+    if (!renderWind.isEmpty()) displayWind = renderWind == "true";
     if (markerStyle == "triangle")
         aircraftMarkerStyle = AircraftMarkerStyle::Triangle;
     else if (markerStyle == "dot")
@@ -83,6 +92,16 @@ void AircraftManager::Update()
         hasScheduledFetch = true;
     }
 
+    if (displayWind) {
+        const unsigned long windInterval =
+            windLabel.isEmpty() ? WIND_RETRY_INTERVAL_MS : WIND_FETCH_INTERVAL_MS;
+        if ((!hasScheduledWindFetch || now - lastWindFetch >= windInterval) &&
+            ScheduleNetworkJob(NetworkJobType::FetchWind)) {
+            lastWindFetch = now;
+            hasScheduledWindFetch = true;
+        }
+    }
+
     ResolveNextDestination();
 }
 
@@ -115,6 +134,8 @@ void AircraftManager::NetworkTaskLoop()
 
         if (job == NetworkJobType::FetchAircraft)
             RunAircraftFetch();
+        else if (job == NetworkJobType::FetchWind)
+            RunWindFetch();
         else if (job == NetworkJobType::ResolveDestination)
             RunDestinationLookup(icao, callsign);
         else if (job == NetworkJobType::SolveLabels) {
@@ -256,6 +277,104 @@ void AircraftManager::RunAircraftFetch()
     }
 }
 
+void AircraftManager::RunWindFetch()
+{
+    const HttpResult result = http.Get(
+        "https://api.open-meteo.com/v1/forecast",
+        {
+            {"latitude", String(lat, 6)},
+            {"longitude", String(lon, 6)},
+            {"current", "wind_speed_10m,wind_direction_10m,wind_gusts_10m"},
+            {"wind_speed_unit", "kn"}
+        }
+    );
+
+    String fetchedWindLabel;
+    if (result.success && result.statusCode >= 200 && result.statusCode < 300) {
+        JsonDocument doc;
+        const DeserializationError error = deserializeJson(doc, result.response);
+        const JsonVariant currentWind = doc["current"];
+        const JsonVariant speedValue = currentWind["wind_speed_10m"];
+        const JsonVariant directionValue = currentWind["wind_direction_10m"];
+        const JsonVariant gustValue = currentWind["wind_gusts_10m"];
+
+        if (!error && !currentWind.isNull() &&
+            !speedValue.isNull() && !directionValue.isNull()) {
+            const float speedValueKnots = speedValue.as<float>();
+            const float directionValueDegrees = directionValue.as<float>();
+            const float gustValueKnots = gustValue.isNull()
+                ? speedValueKnots
+                : gustValue.as<float>();
+
+            const int speedKnots = std::clamp(
+                static_cast<int>(std::lround(speedValueKnots)),
+                0,
+                999
+            );
+            const int gustKnots = std::clamp(
+                static_cast<int>(std::lround(gustValueKnots)),
+                0,
+                999
+            );
+
+            char label[32];
+            if (speedKnots == 0) {
+                snprintf(label, sizeof(label), "WND 00000KT");
+            } else {
+                int directionDegrees =
+                    static_cast<int>(std::lround(directionValueDegrees / 10.0f)) * 10;
+                directionDegrees %= 360;
+                if (directionDegrees <= 0)
+                    directionDegrees += 360;
+
+                if (gustKnots >= speedKnots + 10) {
+                    snprintf(
+                        label,
+                        sizeof(label),
+                        "WND %03d%02dG%02dKT",
+                        directionDegrees,
+                        speedKnots,
+                        gustKnots
+                    );
+                } else {
+                    snprintf(
+                        label,
+                        sizeof(label),
+                        "WND %03d%02dKT",
+                        directionDegrees,
+                        speedKnots
+                    );
+                }
+            }
+            fetchedWindLabel = label;
+        } else {
+            Serial.print("[WARN] Wind response parse failed: ");
+            Serial.println(error ? error.c_str() : "missing current wind fields");
+        }
+    } else {
+        Serial.print("[WARN] Wind API request failed");
+        if (result.statusCode != 0) {
+            Serial.print(" (HTTP ");
+            Serial.print(result.statusCode);
+            Serial.print(")");
+        }
+        if (!result.errorMessage.isEmpty()) {
+            Serial.print(": ");
+            Serial.print(result.errorMessage);
+        }
+        Serial.println();
+    }
+
+    if (xSemaphoreTake(networkStateMutex, portMAX_DELAY) == pdTRUE) {
+        if (!fetchedWindLabel.isEmpty()) {
+            completedWindLabel = fetchedWindLabel;
+            windFetchReady = true;
+        }
+        networkBusy = false;
+        xSemaphoreGive(networkStateMutex);
+    }
+}
+
 void AircraftManager::RunDestinationLookup(const String& icao, const String& callsign)
 {
     String safeCallsign;
@@ -309,6 +428,8 @@ void AircraftManager::ConsumeNetworkResults()
     String routeCallsign;
     String route;
     bool hasRouteLookup = false;
+    String fetchedWindLabel;
+    bool hasWindFetch = false;
     std::vector<LabelLayoutResult> labelLayout;
     bool hasLabelLayout = false;
 
@@ -325,6 +446,12 @@ void AircraftManager::ConsumeNetworkResults()
             route = completedRoute;
             routeLookupReady = false;
             hasRouteLookup = true;
+        }
+        if (windFetchReady) {
+            fetchedWindLabel = completedWindLabel;
+            completedWindLabel = "";
+            windFetchReady = false;
+            hasWindFetch = true;
         }
         if (labelLayoutReady) {
             labelLayout.swap(completedLabelLayout);
@@ -369,6 +496,11 @@ void AircraftManager::ConsumeNetworkResults()
             tracked->second.route = route;
             labelLayoutDirty = true;
         }
+    }
+
+    if (hasWindFetch) {
+        windLabel = fetchedWindLabel;
+        lastWindUpdate = millis();
     }
 
     if (hasLabelLayout) {
@@ -506,30 +638,71 @@ void AircraftManager::Draw(
 
     backbuffer.setTextSize(1);
 
+    // A 240 px display cannot present an unbounded number of readable data
+    // blocks. Keeping a small, fixed label working set also bounds the heap
+    // used by RenderAircraft copies and the label solver in dense airspace.
+    // Markers for aircraft outside this set are still drawn below.
+    constexpr size_t MAX_LABELED_AIRCRAFT = 24;
     std::vector<RenderAircraft> renderAircraft;
-    renderAircraft.reserve(trackedAircraft.size());
+    renderAircraft.reserve(std::min(trackedAircraft.size(), MAX_LABELED_AIRCRAFT));
+
+    constexpr int RADAR_CENTRE = SCREEN_SIZE_DIV_2 - 1;
+    const int markerRadius = aircraftMarkerStyle == AircraftMarkerStyle::RadarVector ? 11 : 7;
+    const int maxMarkerDistance = SCREEN_SIZE_DIV_2 - 1 - markerRadius;
+    auto getVisibleMarkerPosition = [&](const TrackedAircraft& tracked, int& x, int& y) {
+        if (!tracked.visibleOnRadar || tracked.state.onGround)
+            return false;
+
+        const auto [predLat, predLon] = sweepEnabled
+            ? tracked.GetRadarDisplayPosition()
+            : tracked.GetDisplayPosition();
+        const auto projected = ProjectCoordinateToScreen(predLat, predLon);
+        x = projected.first;
+        y = projected.second;
+
+        const int markerDx = x - RADAR_CENTRE;
+        const int markerDy = y - RADAR_CENTRE;
+        return markerDx * markerDx + markerDy * markerDy <=
+            maxMarkerDistance * maxMarkerDistance;
+    };
 
     for (auto& [icao, tracked] : trackedAircraft) {
         if (!tracked.visibleOnRadar || tracked.state.onGround)
             continue;
 
         tracked.Tick();
-        const auto [predLat, predLon] = sweepEnabled
-            ? tracked.GetRadarDisplayPosition()
-            : tracked.GetDisplayPosition();
-        auto [x, y] = ProjectCoordinateToScreen(predLat, predLon);
-
-        // The round panel clips corners of the 240x240 sprite. Do not show a
-        // data block unless the complete aircraft marker is actually visible.
-        constexpr int RADAR_CENTRE = SCREEN_SIZE_DIV_2 - 1;
-        const int markerRadius = aircraftMarkerStyle == AircraftMarkerStyle::RadarVector ? 11 : 7;
-        const int maxMarkerDistance = SCREEN_SIZE_DIV_2 - 1 - markerRadius;
-        const int markerDx = x - RADAR_CENTRE;
-        const int markerDy = y - RADAR_CENTRE;
-        if (markerDx * markerDx + markerDy * markerDy > maxMarkerDistance * maxMarkerDistance)
+        int x = 0;
+        int y = 0;
+        if (!getVisibleMarkerPosition(tracked, x, y))
             continue;
 
-        renderAircraft.push_back(BuildRenderAircraft(backbuffer, x, y, tracked));
+        const int markerDx = x - RADAR_CENTRE;
+        const int markerDy = y - RADAR_CENTRE;
+        const int distanceSquared = markerDx * markerDx + markerDy * markerDy;
+
+        if (renderAircraft.size() < MAX_LABELED_AIRCRAFT) {
+            renderAircraft.push_back(BuildRenderAircraft(backbuffer, x, y, tracked));
+            continue;
+        }
+
+        // Prefer labels nearest the radar centre. They are the most relevant
+        // targets and have the least room for labels outside the round panel.
+        auto farthest = std::max_element(
+            renderAircraft.begin(),
+            renderAircraft.end(),
+            [](const RenderAircraft& first, const RenderAircraft& second) {
+                const int firstDx = first.x - RADAR_CENTRE;
+                const int firstDy = first.y - RADAR_CENTRE;
+                const int secondDx = second.x - RADAR_CENTRE;
+                const int secondDy = second.y - RADAR_CENTRE;
+                return firstDx * firstDx + firstDy * firstDy <
+                    secondDx * secondDx + secondDy * secondDy;
+            }
+        );
+        const int farthestDx = farthest->x - RADAR_CENTRE;
+        const int farthestDy = farthest->y - RADAR_CENTRE;
+        if (distanceSquared < farthestDx * farthestDx + farthestDy * farthestDy)
+            *farthest = BuildRenderAircraft(backbuffer, x, y, tracked);
     }
 
     PlaceAircraftLabels(renderAircraft);
@@ -542,19 +715,28 @@ void AircraftManager::Draw(
     for (const auto& aircraft : renderAircraft)
         DrawAircraftInfo(backbuffer, aircraft);
 
-    for (const auto& aircraft : renderAircraft) {
+    // Draw every in-range aircraft marker, including targets whose data blocks
+    // were omitted from the bounded label set.
+    for (const auto& [icao, tracked] : trackedAircraft) {
+        int x = 0;
+        int y = 0;
+        if (!getVisibleMarkerPosition(tracked, x, y))
+            continue;
+
         switch (aircraftMarkerStyle) {
             case AircraftMarkerStyle::RadarVector:
-                DrawAircraftRadarVector(backbuffer, aircraft.x, aircraft.y, *aircraft.tracked);
+                DrawAircraftRadarVector(backbuffer, x, y, tracked);
                 break;
             case AircraftMarkerStyle::Triangle:
-                DrawAircraftTriangle(backbuffer, aircraft.x, aircraft.y, *aircraft.tracked);
+                DrawAircraftTriangle(backbuffer, x, y, tracked);
                 break;
             case AircraftMarkerStyle::Dot:
-                backbuffer.fillCircle(aircraft.x, aircraft.y, 3, lgfx::color888(0, 255, 0));
+                backbuffer.fillCircle(x, y, 3, lgfx::color888(0, 255, 0));
                 break;
         }
     }
+
+    DrawWindInfo(backbuffer);
 }
 
 void AircraftManager::DrawRadarCircles(LGFX_Sprite& backbuffer) const
@@ -874,6 +1056,28 @@ void AircraftManager::SolveAircraftLabels(std::vector<RenderAircraft>& aircraft)
     previousLabels.reserve(aircraft.size());
     std::vector<CandidateSet> candidates(aircraft.size());
 
+    // The pair-repair search can run for several seconds in dense airspace.
+    // radar-network has a higher priority than IDLE0, so remaining runnable
+    // throughout that search prevents IDLE0 from servicing the task watchdog.
+    // Periodically block for one tick instead of merely yielding: taskYIELD()
+    // only offers the CPU to tasks at the same priority.
+    constexpr unsigned long IDLE_SERVICE_INTERVAL_MS = 10;
+    constexpr uint16_t WORK_ITEMS_PER_IDLE_CHECK = 128;
+    unsigned long lastIdleServiceAt = millis();
+    uint16_t workItemsSinceIdleCheck = 0;
+    auto serviceIdleTask = [&]() {
+        if (++workItemsSinceIdleCheck < WORK_ITEMS_PER_IDLE_CHECK)
+            return;
+
+        workItemsSinceIdleCheck = 0;
+        const unsigned long currentTime = millis();
+        if (currentTime - lastIdleServiceAt < IDLE_SERVICE_INTERVAL_MS)
+            return;
+
+        vTaskDelay(1);
+        lastIdleServiceAt = millis();
+    };
+
     static constexpr int8_t DIRECTIONS[8][2] = {
         { 1, 0 }, { -1, 0 }, { 0, -1 }, { 0, 1 },
         { 1, -1 }, { -1, -1 }, { 1, 1 }, { -1, 1 }
@@ -960,6 +1164,8 @@ void AircraftManager::SolveAircraftLabels(std::vector<RenderAircraft>& aircraft)
     }
 
     auto unaryCost = [&](size_t index, const LabelBox& candidate) {
+        serviceIdleTask();
+
         LayoutCost cost;
         const auto& current = aircraft[index];
 
@@ -980,6 +1186,31 @@ void AircraftManager::SolveAircraftLabels(std::vector<RenderAircraft>& aircraft)
         }
 
         const Segment leader = makeLeader(current, candidate);
+
+        if (displayWind) {
+            const LabelBox windBox = {
+                WIND_LABEL_X,
+                WIND_LABEL_Y,
+                WIND_LABEL_WIDTH,
+                WIND_LABEL_HEIGHT
+            };
+            const int windCallsignArea = overlapArea(
+                callsignBox(current, candidate),
+                windBox
+            );
+            if (windCallsignArea > 0)
+                ++cost.callsignConflicts;
+            cost.callsignOverlapArea += windCallsignArea;
+
+            const int windLabelArea = overlapArea(candidate, windBox);
+            if (windLabelArea > 0)
+                ++cost.labelConflicts;
+            cost.labelOverlapArea += windLabelArea;
+
+            if (segmentIntersectsBox(leader, windBox))
+                ++cost.leaderLabelCrossings;
+        }
+
         for (size_t otherIndex = 0; otherIndex < aircraft.size(); ++otherIndex) {
             if (otherIndex == index)
                 continue;
@@ -1035,6 +1266,8 @@ void AircraftManager::SolveAircraftLabels(std::vector<RenderAircraft>& aircraft)
 
     auto interactionCost = [&](size_t firstIndex, const LabelBox& firstLabel,
                                size_t secondIndex, const LabelBox& secondLabel) {
+        serviceIdleTask();
+
         LayoutCost cost;
         const auto& first = aircraft[firstIndex];
         const auto& second = aircraft[secondIndex];
@@ -1236,6 +1469,21 @@ void AircraftManager::DrawLabelLeader(LGFX_Sprite& backbuffer, const RenderAircr
     const int startX = aircraft.x + static_cast<int>(dx * MARKER_CLEARANCE / distance);
     const int startY = aircraft.y + static_cast<int>(dy * MARKER_CLEARANCE / distance);
     backbuffer.drawLine(startX, startY, closestX, closestY, lgfx::color888(0, 180, 0));
+}
+
+void AircraftManager::DrawWindInfo(LGFX_Sprite& backbuffer) const
+{
+    if (!displayWind || windLabel.isEmpty() || lastWindUpdate == 0 ||
+        millis() - lastWindUpdate >= WIND_STALE_INTERVAL_MS)
+        return;
+
+    backbuffer.setTextSize(1);
+    backbuffer.setTextColor(lgfx::color888(0, 210, 0));
+    backbuffer.drawCentreString(
+        windLabel,
+        SCREEN_SIZE_DIV_2,
+        WIND_LABEL_Y
+    );
 }
 
 void AircraftManager::ResolveNextDestination()

@@ -17,6 +17,7 @@ private:
     enum class NetworkJobType : uint8_t {
         None,
         FetchAircraft,
+        FetchWind,
         ResolveDestination,
         SolveLabels
     };
@@ -63,11 +64,16 @@ private:
     bool displayAltitude = true;
     bool displayAltitudeInFeet = true;
     bool displayDestination = false;
+    bool displayWind = false;
     AircraftMarkerStyle aircraftMarkerStyle = AircraftMarkerStyle::RadarVector;
 
     unsigned long fetchInterval = 0;
     unsigned long lastFetch = 0;
     bool hasScheduledFetch = false;
+    unsigned long lastWindFetch = 0;
+    unsigned long lastWindUpdate = 0;
+    bool hasScheduledWindFetch = false;
+    String windLabel;
     unsigned long lastDestinationLookup = 0;
     unsigned long lastLabelLayout = 0;
     bool labelLayoutDirty = true;
@@ -89,6 +95,8 @@ private:
     String completedRouteCallsign;
     String completedRoute;
     bool routeLookupReady = false;
+    String completedWindLabel;
+    bool windFetchReady = false;
     std::vector<RenderAircraft> labelLayoutJobAircraft;
     std::vector<TrackedAircraft> labelLayoutJobTracked;
     std::vector<LabelLayoutResult> completedLabelLayout;
@@ -106,6 +114,7 @@ private:
     void SolveAircraftLabels(std::vector<RenderAircraft>& aircraft);
     void DrawAircraftInfo(LGFX_Sprite& backbuffer, const RenderAircraft& aircraft) const;
     void DrawLabelLeader(LGFX_Sprite& backbuffer, const RenderAircraft& aircraft) const;
+    void DrawWindInfo(LGFX_Sprite& backbuffer) const;
     void DrawAircraftRadarVector(LGFX_Sprite& backbuffer, int x, int y, const TrackedAircraft& tracked) const;
     void DrawAircraftTriangle(LGFX_Sprite& backbuffer, int x, int y, const TrackedAircraft& tracked) const;
     void ResolveNextDestination();
@@ -113,6 +122,7 @@ private:
     bool ScheduleLabelLayout(const std::vector<RenderAircraft>& aircraft);
     void ConsumeNetworkResults();
     void RunAircraftFetch();
+    void RunWindFetch();
     void RunDestinationLookup(const String& icao, const String& callsign);
     void NetworkTaskLoop();
     static void NetworkTaskEntry(void* context);
