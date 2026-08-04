@@ -35,7 +35,7 @@ void setup()
 
   // initialise LGFX + screen
   tft.init();
-  tft.invertDisplay(true);
+  tft.invertDisplay(false); // GC9B72 doesn't need inversion (unlike the old GC9A01)
 
   backbuffer.setColorDepth(8);
   backbuffer.createSprite(SCREEN_SIZE, SCREEN_SIZE);
