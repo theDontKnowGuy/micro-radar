@@ -23,6 +23,7 @@
 #include <driver/gpio.h>
 #include <driver/spi_master.h>
 #include <esp_heap_caps.h>
+#include <esp_system.h>
 
 namespace lgfx
 {
@@ -97,7 +98,15 @@ namespace lgfx
       {
         if (!_slotBuf(s)) { return false; }
       }
-      return _ensure(MAX_CHUNK) != nullptr;
+      if (!_ensure(MAX_CHUNK)) { return false; }
+
+      // Resetting the chip with DMA transfers still in flight corrupts memory
+      // during the next boot. The main loop already waits for the bus before a
+      // settings restart, but this covers the paths we do not control -- OTA,
+      // WiFiManager reboots, watchdog resets.
+      _shutdownTarget = this;
+      esp_register_shutdown_handler(_onShutdown);
+      return true;
     }
 
     void release(void) override
@@ -288,6 +297,16 @@ namespace lgfx
     void _drain(void)
     {
       while (_pending > 0) { _reap(); }
+    }
+
+    // esp_register_shutdown_handler() takes a plain function pointer, so the
+    // active instance is tracked here. Shutdown handlers run before interrupts
+    // are disabled, so the DMA completion interrupts this waits on still fire.
+    static inline Bus_GC9B72_SPI* _shutdownTarget = nullptr;
+
+    static void _onShutdown(void)
+    {
+      if (_shutdownTarget) { _shutdownTarget->_drain(); }
     }
 
     // Any queued transfer was issued for the CURRENT state of DC, so the queue

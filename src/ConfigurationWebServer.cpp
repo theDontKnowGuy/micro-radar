@@ -1032,7 +1032,12 @@ void ConfigurationWebServer::Initialise() {
         prefs.end();
 
         request->send(200, "text/html", "Saved - restarting device...");
-        ESP.restart();
+
+        // Deliberately not ESP.restart() here: this runs on the AsyncTCP task,
+        // and resetting mid-frame leaves SPI DMA transfers in flight, which
+        // corrupts memory during the next boot. The main loop picks this up and
+        // restarts once the display is idle. See ConfigurationWebServer.h.
+        restartRequested.store(true);
         }
     );
 

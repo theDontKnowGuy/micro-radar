@@ -108,6 +108,15 @@ void setup()
 
 void loop()
 {
+  // Settings were saved over the web UI. Restart here rather than in the
+  // request handler, so no SPI DMA transfer is in flight when the chip resets.
+  if (configServer.RestartRequested()) {
+    Serial.println("Settings saved - restarting");
+    delay(200);   // let the HTTP response finish going out
+    tft.waitDMA(); // make sure the panel bus is idle
+    ESP.restart();
+  }
+
   aircraftManager.Update();
 
   // Keep presentation cadence stable even when the rest of the loop completes
