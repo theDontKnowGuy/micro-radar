@@ -55,6 +55,20 @@ namespace lgfx
       return true;
     }
 
+    // Panel_GC9xxx::setWindow caches the address window and skips CASET/RASET
+    // when it is unchanged. Every frame here pushes the same full-screen
+    // window, so after the first frame only RAMWR would be sent -- meaning a
+    // single corrupted transfer could leave the panel's window wrong with
+    // nothing to ever restore it, and the image stays shifted permanently.
+    //
+    // Invalidating the cache costs 8 bytes per frame and makes a glitch cost
+    // one bad frame instead of every frame after it.
+    void setWindow(uint_fast16_t xs, uint_fast16_t ys, uint_fast16_t xe, uint_fast16_t ye) override
+    {
+      _xs = _ys = _xe = _ye = INT16_MAX;
+      Panel_GC9xxx::setWindow(xs, ys, xe, ye);
+    }
+
   protected:
 
     // Sends one command (and its argument byte) with the same per-command CS

@@ -25,6 +25,11 @@ AircraftManager aircraftManager(configServer, authHandler, http);
 bool renderRadarSweep = true;
 unsigned long radarSweepPeriodMs = 5000;
 
+// Set true to log per-frame draw/push timing, frame rate and free heap over
+// serial every 2s. Handy when tuning the SPI clock or tracking down a
+// frame-rate or memory regression; off by default so the log stays readable.
+constexpr bool LOG_FRAME_TIMING = false;
+
 void setup()
 {
   Serial.begin(115200);
@@ -34,8 +39,18 @@ void setup()
   tft.init();
   tft.invertDisplay(DISPLAY_INVERT); // differs per panel, see DisplayConfig.h
 
+  // At 360x360 the backbuffer is 129,600 bytes. Keeping that in SRAM leaves too
+  // little contiguous heap for the TLS handshake OpenSky needs -- requests fail
+  // with "SSL - Memory allocation failed" -- so put it in PSRAM when the board
+  // has any. Falls back to SRAM, which is fine for the 240x240 panel.
+  if (ESP.getPsramSize() > 0)
+    backbuffer.setPsram(true);
+
   backbuffer.setColorDepth(8);
-  backbuffer.createSprite(SCREEN_SIZE, SCREEN_SIZE);
+  if (!backbuffer.createSprite(SCREEN_SIZE, SCREEN_SIZE)) {
+    Serial.printf("FATAL: could not allocate %dx%d backbuffer (%d bytes)\n",
+                  SCREEN_SIZE, SCREEN_SIZE, SCREEN_SIZE * SCREEN_SIZE);
+  }
 
   // establish WiFi connection
   tft.fillScreen(lgfx::color888(0, 0, 0));
@@ -108,6 +123,7 @@ void loop()
   lastFrameAt = now;
 
   // draw cycle
+  const uint32_t drawStartedUs = micros();
   backbuffer.fillScreen(lgfx::color888(0, 0, 0));
 
   float sweepAngle = 0.0f;
@@ -142,5 +158,38 @@ void loop()
     renderRadarSweep,
     radarSweepPeriodMs
   );
+
+  const uint32_t pushStartedUs = micros();
   backbuffer.pushSprite(0, 0);
+  const uint32_t frameEndedUs = micros();
+
+  // The sprite push is SCREEN_SIZE^2 * 2 bytes over SPI and dominates the frame,
+  // so the SPI clock sets the frame rate directly. Reported as degrees-of-sweep
+  // per frame because that is what actually reads as smooth or jumpy.
+  static uint32_t frameCount = 0;
+  static uint32_t drawUsTotal = 0;
+  static uint32_t pushUsTotal = 0;
+  static unsigned long lastTimingReportAt = 0;
+
+  drawUsTotal += pushStartedUs - drawStartedUs;
+  pushUsTotal += frameEndedUs - pushStartedUs;
+  frameCount++;
+
+  if (LOG_FRAME_TIMING && now - lastTimingReportAt >= 2000) {
+    lastTimingReportAt = now;
+    const float drawMs = (drawUsTotal / 1000.0f) / frameCount;
+    const float pushMs = (pushUsTotal / 1000.0f) / frameCount;
+    const float totalMs = drawMs + pushMs;
+    Serial.printf(
+      "frame: draw %.1fms  push %.1fms  total %.1fms  %.1f fps  %.1f deg/frame"
+      "  heap %u (largest %u)\n",
+      drawMs, pushMs, totalMs,
+      totalMs > 0.0f ? 1000.0f / totalMs : 0.0f,
+      360.0f * (totalMs / static_cast<float>(radarSweepPeriodMs)),
+      ESP.getFreeHeap(), ESP.getMaxAllocHeap()
+    );
+    frameCount = 0;
+    drawUsTotal = 0;
+    pushUsTotal = 0;
+  }
 }

@@ -30,15 +30,23 @@ It:
 - Configurable sweep speed: 2, 5, 10, 18, or 30 seconds per revolution.
 - Three aircraft symbols: radar vector, directional triangle, or dot.
 - Optional speed, altitude, and `ORIGIN-DESTINATION` route labels.
+- Optional aviation-style surface-wind readout for the configured radar centre.
 - Knots or metres per second; metres or compact aviation-style feet.
 - Improved configuration page with location detection and place search.
 
 ## Hardware
 
 - ESP32-S3 DevKitM-1
-- Separate 1.28-inch 240 × 240 GC9A01 SPI TFT
+- One of:
+  - a 1.28-inch 240 × 240 GC9A01 SPI TFT, or
+  - a 2.1-inch 360 × 360 GC9B72 SPI TFT (needs an **N16R8** module — 16 MB flash and 8 MB octal PSRAM)
 - USB data cable
 - Jumper wires or soldered connections
+
+The 360 × 360 panel needs a 129,600-byte framebuffer, which does not fit in SRAM
+alongside the Wi-Fi stack and a TLS handshake. On an N16R8 module the firmware
+puts it in PSRAM automatically; on a board without PSRAM, OpenSky requests fail
+with `SSL - Memory allocation failed`.
 
 Check the voltage requirements of your exact display board before connecting power.
 
@@ -47,27 +55,53 @@ Check the voltage requirements of your exact display board before connecting pow
 
 ## Wiring
 
-The pin assignment is defined in [`include/LGFX.h`](include/LGFX.h).
+The pin assignment is defined in [`include/LGFX.h`](include/LGFX.h). **The two
+panels use different pins for `SCL` and `SDA`** — see the note below.
 
-| GC9A01 pin | ESP32-S3 |
-|---|---:|
-| `GND` | `GND` |
-| `VCC` | Per display specification |
-| `SCL` / `SCLK` | GPIO 11 |
-| `SDA` / `MOSI` | GPIO 12 |
-| `DC` | GPIO 2 |
-| `CS` | GPIO 13 |
-| `RST` / `RES` | Not controlled by firmware |
-| `BL` / `LED` | Not controlled by firmware |
+| Display pin | GC9A01 (1.28") | GC9B72 (2.1") |
+|---|---:|---:|
+| `GND` | `GND` | `GND` |
+| `VCC` | Per display specification | Per display specification |
+| `SCL` / `SCLK` | GPIO 11 | **GPIO 12** |
+| `SDA` / `MOSI` | GPIO 12 | **GPIO 11** |
+| `DC` | GPIO 2 | GPIO 2 |
+| `CS` | GPIO 13 | GPIO 13 |
+| `RST` / `RES` | Not controlled by firmware | **GPIO 6** |
+| `BL` / `LED` | Not controlled by firmware | `3V3` |
 
-MISO is not used. If your wiring is different, update `include/LGFX.h`.
+`MISO`/`SDO` and `TE` are not used by either panel.
+
+> [!IMPORTANT]
+> `SCL` and `SDA` are swapped between the two panels on purpose. GPIO 12 and 11
+> are the ESP32-S3's native IOMUX pins for SPI2 (`FSPICLK` and `FSPID`), and
+> matching them lets the bus bypass the GPIO matrix. That raises the SPI ceiling
+> from 40 MHz to 80 MHz, which roughly halves the time to push a 360 × 360 frame
+> and is the difference between a jumpy and a smooth radar sweep.
+
+If your wiring is different, update `include/LGFX.h`.
 
 ## Build and upload
 
 1. Install [VS Code](https://code.visualstudio.com/) and [PlatformIO](https://platformio.org/install/ide?install=vscode).
 2. Open this repository in VS Code.
 3. Connect the ESP32-S3 with a USB data cable.
-4. Run **PlatformIO: Upload**.
+4. Pick the environment for your display, then run **PlatformIO: Upload**.
+
+| Display | Environment |
+|---|---|
+| 1.28-inch GC9A01 | `esp32-s3-devkitm-1` |
+| 2.1-inch GC9B72 | `esp32-s3-gc9b72` |
+
+The panel is selected with a build flag, so both share one codebase — see
+[`include/DisplayConfig.h`](include/DisplayConfig.h). Do not flash the
+`esp32-s3-gc9b72` environment to a board without octal PSRAM; it configures the
+module for 16 MB flash and 8 MB OPI PSRAM.
+
+From the command line:
+
+```bash
+pio run -e esp32-s3-gc9b72 -t upload -t monitor
+```
 
 The serial monitor runs at `115200` baud. If uploading fails, use your board's BOOT/RESET upload sequence.
 
@@ -98,11 +132,14 @@ The web page lets you set:
 - OpenSky client credentials;
 - sweep animation and speed;
 - aircraft symbol;
+- center surface-wind readout;
 - speed, altitude, units, and route labels.
+
+When the surface-wind display is enabled, it uses an aviation-style readout. For example, `WND 32025G30KT` means wind from 320° at 25 knots, gusting to 30 knots.
 
 Saving restarts the radar.
 
-An [OpenSky Network](https://opensky-network.org/) account is optional but provides a larger request allowance. Route labels use [ADSBDB](https://www.adsbdb.com/). Place search uses [Nominatim](https://nominatim.org/), and approximate location uses [IPWhoIs](https://ipwhois.io/).
+An [OpenSky Network](https://opensky-network.org/) account is optional but provides a larger request allowance. Route labels use [ADSBDB](https://www.adsbdb.com/), and center surface wind uses [Open-Meteo](https://open-meteo.com/). Place search uses [Nominatim](https://nominatim.org/), and approximate location uses [IPWhoIs](https://ipwhois.io/).
 
 ## Enclosure files
 
