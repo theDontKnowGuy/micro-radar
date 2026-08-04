@@ -65,6 +65,7 @@ private:
     bool displayAltitudeInFeet = true;
     bool displayDestination = false;
     bool displayWind = false;
+    String locationNameLabel;
     AircraftMarkerStyle aircraftMarkerStyle = AircraftMarkerStyle::RadarVector;
 
     unsigned long fetchInterval = 0;
@@ -115,6 +116,7 @@ private:
     void DrawAircraftInfo(LGFX_Sprite& backbuffer, const RenderAircraft& aircraft) const;
     void DrawLabelLeader(LGFX_Sprite& backbuffer, const RenderAircraft& aircraft) const;
     void DrawWindInfo(LGFX_Sprite& backbuffer) const;
+    void DrawLocationInfo(LGFX_Sprite& backbuffer) const;
     void DrawAircraftRadarVector(LGFX_Sprite& backbuffer, int x, int y, const TrackedAircraft& tracked) const;
     void DrawAircraftTriangle(LGFX_Sprite& backbuffer, int x, int y, const TrackedAircraft& tracked) const;
     void ResolveNextDestination();

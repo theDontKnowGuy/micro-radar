@@ -17,6 +17,24 @@ static String EscapeHtmlAttribute(const String& value) {
     return escaped;
 }
 
+static String CleanLocationName(const String& value)
+{
+    String cleaned;
+    cleaned.reserve(value.length());
+
+    for (size_t i = 0; i < value.length(); ++i) {
+        char c = value[i];
+        cleaned += (c >= 32) ? c : ' ';
+    }
+
+    cleaned.trim();
+
+    if (cleaned.length() > 18)
+        cleaned.remove(18);
+
+    return cleaned;
+}
+
 // HTML stored in flash
 // %PLACEHOLDER% tokens are substituted at serve time by the template processor.
 // Do not put literal percent signs inside CONFIG_HTML (including CSS percentages),
@@ -335,6 +353,9 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                 width: auto;
                 min-height: 7rem;
             }
+            .location-name input {
+                max-width: 18rem;
+            }
             #place-result,
             #location-result {
                 color: var(--muted);
@@ -513,6 +534,16 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                             hidden
                             aria-label="Place search results"></select>
                     </div>
+                    <label class="field-row location-name mt-3">
+                        <span>Screen name:</span>
+                        <input
+                            id="location-name"
+                            name="location-name"
+                            maxlength="18"
+                            value="%LOCATION_NAME%"
+                            placeholder="e.g. Ben Gurion">
+                    </label>
+                    <div class="mt-2 text-xs">Shown at the bottom of the radar display. Place search suggests a short name.</div>
                     <div id="place-result" class="mt-2 text-sm" aria-live="polite"></div>
                     <div class="mt-2 text-xs">
                         Search data &copy;
@@ -671,8 +702,10 @@ static const char CONFIG_HTML[] PROGMEM = R"(
             const placeSearchButton = document.getElementById('search-places');
             const placeResults = document.getElementById('place-results');
             const placeResult = document.getElementById('place-result');
+            const locationNameInput = document.getElementById('location-name');
             const placeSearchCache = new Map();
             let lastPlaceSearchAt = 0;
+            const maxLocationNameLength = 18;
 
             function bindDependentSelect(toggleId, selectId) {
                 const toggle = document.getElementById(toggleId);
@@ -692,9 +725,11 @@ static const char CONFIG_HTML[] PROGMEM = R"(
             bindDependentSelect('speed', 'speed-unit');
             bindDependentSelect('altitude', 'altitude-unit');
 
-            function fillLocation(latitude, longitude, message) {
+            function fillLocation(latitude, longitude, message, suggestedName) {
                 document.getElementById('latitude').value = Number(latitude).toFixed(6);
                 document.getElementById('longitude').value = Number(longitude).toFixed(6);
+                if (typeof suggestedName === 'string' && suggestedName.trim())
+                    locationNameInput.value = compactLocationName(suggestedName);
                 locationResult.textContent = message + ' Press Save to apply.';
             }
 
@@ -714,7 +749,8 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                         fillLocation(
                             data.latitude,
                             data.longitude,
-                            'Approximate network location filled' + (area ? ' (' + area + ').' : '.')
+                            'Approximate network location filled' + (area ? ' (' + area + ').' : '.'),
+                            area
                         );
                     })
                     .catch(function() {
@@ -762,6 +798,67 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                 );
             });
 
+            function compactLocationName(value) {
+                let cleaned = String(value || '')
+                    .replace(/\s+/g, ' ')
+                    .replace(/\s*,\s*/g, ', ')
+                    .trim();
+                if (cleaned.length <= maxLocationNameLength)
+                    return cleaned;
+
+                let compacted = cleaned
+                    .replace(/\bInternational\b/ig, '')
+                    .replace(/\s+/g, ' ')
+                    .trim();
+                if (compacted.length <= maxLocationNameLength)
+                    return compacted;
+
+                compacted = compacted.replace(/\s+Airport\b/i, '').trim();
+                if (compacted.length <= maxLocationNameLength)
+                    return compacted;
+
+                const words = compacted.split(' ');
+                let selected = '';
+                for (const word of words) {
+                    const next = selected ? selected + ' ' + word : word;
+                    if (next.length > maxLocationNameLength)
+                        break;
+                    selected = next;
+                }
+                return selected || compacted.slice(0, maxLocationNameLength);
+            }
+
+            function firstText(value) {
+                return String(value || '')
+                    .split(',')[0]
+                    .replace(/\s*\([^)]*\)\s*/g, ' ')
+                    .replace(/\s+/g, ' ')
+                    .trim();
+            }
+
+            function placeName(place) {
+                const names = place.namedetails || {};
+                return firstText(names['name:en'] || names.name || place.name || place.display_name);
+            }
+
+            function placeCode(place) {
+                const tags = place.extratags || {};
+                const code = String(tags.icao || tags.iata || '').trim().toUpperCase();
+                return /^[A-Z0-9]{3,5}$/.test(code) ? code : '';
+            }
+
+            function suggestLocationName(place) {
+                const compacted = compactLocationName(placeName(place));
+                if (compacted)
+                    return compacted;
+
+                const code = placeCode(place);
+                if (code)
+                    return code;
+
+                return compactLocationName(place.display_name);
+            }
+
             function showPlaceResults(results) {
                 placeResults.replaceChildren();
 
@@ -770,6 +867,7 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                     option.textContent = place.display_name;
                     option.dataset.latitude = place.lat;
                     option.dataset.longitude = place.lon;
+                    option.dataset.locationName = suggestLocationName(place);
                     placeResults.appendChild(option);
                 });
 
@@ -811,6 +909,8 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                 searchUrl.searchParams.set('format', 'jsonv2');
                 searchUrl.searchParams.set('limit', '5');
                 searchUrl.searchParams.set('addressdetails', '0');
+                searchUrl.searchParams.set('namedetails', '1');
+                searchUrl.searchParams.set('extratags', '1');
 
                 placeSearchButton.disabled = true;
                 placeResult.textContent = 'Searching places...';
@@ -851,9 +951,12 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                 fillLocation(
                     selected.dataset.latitude,
                     selected.dataset.longitude,
-                    'Selected place coordinates filled.'
+                    'Selected place coordinates filled.',
+                    selected.dataset.locationName
                 );
-                placeResult.textContent = selected.textContent;
+                placeResult.textContent = selected.dataset.locationName
+                    ? 'Suggested screen name: ' + selected.dataset.locationName
+                    : selected.textContent;
             });
 
             document.getElementById('cfg').addEventListener('submit', function(e) {
@@ -877,6 +980,7 @@ void ConfigurationWebServer::EnsureDefaults() {
 
     ensureKey("latitude", "");
     ensureKey("longitude", "");
+    ensureKey("location-name", "");
     ensureKey("radius", "1.0");
     ensureKey("opensky-id", "");
     ensureKey("opensky-secret", "");
@@ -915,6 +1019,7 @@ void ConfigurationWebServer::Initialise() {
         prefs.begin("config", true);
         const String latitude = EscapeHtmlAttribute(prefs.getString("latitude", ""));
         const String longitude = EscapeHtmlAttribute(prefs.getString("longitude", ""));
+        const String locationName = EscapeHtmlAttribute(prefs.getString("location-name", ""));
         const String radius = EscapeHtmlAttribute(prefs.getString("radius", "1.0"));
         const String openskyClientId = EscapeHtmlAttribute(prefs.getString("opensky-id", ""));
         String openskySecret = prefs.getString("opensky-secret", "");
@@ -941,10 +1046,11 @@ void ConfigurationWebServer::Initialise() {
         AsyncWebServerResponse* response = request->beginResponse(
             200, "text/html",
             (const uint8_t*)CONFIG_HTML, sizeof(CONFIG_HTML) - 1,
-            [latitude, longitude, radius, openskyClientId, openskySecret, geocoderUrl, scanlineEnabled, sweepPeriod, speedEnabled, speedUnit, altitudeEnabled, altitudeUnit, destinationEnabled, windEnabled, aircraftMarker]
+            [latitude, longitude, locationName, radius, openskyClientId, openskySecret, geocoderUrl, scanlineEnabled, sweepPeriod, speedEnabled, speedUnit, altitudeEnabled, altitudeUnit, destinationEnabled, windEnabled, aircraftMarker]
             (const String& var) -> String {
                 if (var == "LATITUDE")       return latitude;
                 if (var == "LONGITUDE")      return longitude;
+                if (var == "LOCATION_NAME")  return locationName;
                 if (var == "RADIUS")         return radius;
                 if (var == "OPENSKY_ID")     return openskyClientId;
                 if (var == "OPENSKY_SECRET") return openskySecret;
@@ -1000,6 +1106,10 @@ void ConfigurationWebServer::Initialise() {
         TrySaveParam("geocoder-url");
         TrySaveParam("speed-unit");
         TrySaveParam("altitude-unit");
+
+        const auto* locationNameParam = request->getParam("location-name", true);
+        if (locationNameParam != nullptr)
+            prefs.putString("location-name", CleanLocationName(locationNameParam->value()));
 
         const auto* sweepPeriodParam = request->getParam("sweep-period", true);
         if (sweepPeriodParam != nullptr) {

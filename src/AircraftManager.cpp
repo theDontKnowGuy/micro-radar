@@ -10,6 +10,10 @@ constexpr int WIND_LABEL_WIDTH = 108;
 constexpr int WIND_LABEL_HEIGHT = 11;
 constexpr int WIND_LABEL_X = (SCREEN_SIZE - WIND_LABEL_WIDTH) / 2;
 constexpr int WIND_LABEL_Y = 16;
+constexpr int LOCATION_LABEL_WIDTH = 108;
+constexpr int LOCATION_LABEL_HEIGHT = 11;
+constexpr int LOCATION_LABEL_X = (SCREEN_SIZE - LOCATION_LABEL_WIDTH) / 2;
+constexpr int LOCATION_LABEL_Y = SCREEN_SIZE - WIND_LABEL_Y - LOCATION_LABEL_HEIGHT;
 
 #include <ArduinoJson.h>
 #include <algorithm>
@@ -31,6 +35,10 @@ void AircraftManager::Initialise()
     const String renderDestination = configServer.GetStoredString("destination");
     const String renderWind = configServer.GetStoredString("wind");
     const String markerStyle = configServer.GetStoredString("aircraft-marker");
+    locationNameLabel = configServer.GetStoredString("location-name");
+    locationNameLabel.trim();
+    if (locationNameLabel.length() > 18)
+        locationNameLabel.remove(18);
     if (!renderSpeed.isEmpty()) displaySpeed = renderSpeed == "true";
     if (!speedUnit.isEmpty()) displaySpeedInKnots = speedUnit == "knots";
     if (!renderAltitude.isEmpty()) displayAltitude = renderAltitude == "true";
@@ -737,6 +745,7 @@ void AircraftManager::Draw(
     }
 
     DrawWindInfo(backbuffer);
+    DrawLocationInfo(backbuffer);
 }
 
 void AircraftManager::DrawRadarCircles(LGFX_Sprite& backbuffer) const
@@ -1187,6 +1196,24 @@ void AircraftManager::SolveAircraftLabels(std::vector<RenderAircraft>& aircraft)
 
         const Segment leader = makeLeader(current, candidate);
 
+        auto addReservedLabelCost = [&](const LabelBox& reservedBox) {
+            const int reservedCallsignArea = overlapArea(
+                callsignBox(current, candidate),
+                reservedBox
+            );
+            if (reservedCallsignArea > 0)
+                ++cost.callsignConflicts;
+            cost.callsignOverlapArea += reservedCallsignArea;
+
+            const int reservedLabelArea = overlapArea(candidate, reservedBox);
+            if (reservedLabelArea > 0)
+                ++cost.labelConflicts;
+            cost.labelOverlapArea += reservedLabelArea;
+
+            if (segmentIntersectsBox(leader, reservedBox))
+                ++cost.leaderLabelCrossings;
+        };
+
         if (displayWind) {
             const LabelBox windBox = {
                 WIND_LABEL_X,
@@ -1194,21 +1221,17 @@ void AircraftManager::SolveAircraftLabels(std::vector<RenderAircraft>& aircraft)
                 WIND_LABEL_WIDTH,
                 WIND_LABEL_HEIGHT
             };
-            const int windCallsignArea = overlapArea(
-                callsignBox(current, candidate),
-                windBox
-            );
-            if (windCallsignArea > 0)
-                ++cost.callsignConflicts;
-            cost.callsignOverlapArea += windCallsignArea;
+            addReservedLabelCost(windBox);
+        }
 
-            const int windLabelArea = overlapArea(candidate, windBox);
-            if (windLabelArea > 0)
-                ++cost.labelConflicts;
-            cost.labelOverlapArea += windLabelArea;
-
-            if (segmentIntersectsBox(leader, windBox))
-                ++cost.leaderLabelCrossings;
+        if (!locationNameLabel.isEmpty()) {
+            const LabelBox locationBox = {
+                LOCATION_LABEL_X,
+                LOCATION_LABEL_Y,
+                LOCATION_LABEL_WIDTH,
+                LOCATION_LABEL_HEIGHT
+            };
+            addReservedLabelCost(locationBox);
         }
 
         for (size_t otherIndex = 0; otherIndex < aircraft.size(); ++otherIndex) {
@@ -1483,6 +1506,20 @@ void AircraftManager::DrawWindInfo(LGFX_Sprite& backbuffer) const
         windLabel,
         SCREEN_SIZE_DIV_2,
         WIND_LABEL_Y
+    );
+}
+
+void AircraftManager::DrawLocationInfo(LGFX_Sprite& backbuffer) const
+{
+    if (locationNameLabel.isEmpty())
+        return;
+
+    backbuffer.setTextSize(1);
+    backbuffer.setTextColor(lgfx::color888(100, 100, 100));
+    backbuffer.drawCentreString(
+        locationNameLabel,
+        SCREEN_SIZE_DIV_2,
+        LOCATION_LABEL_Y
     );
 }
 

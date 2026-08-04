@@ -129,6 +129,7 @@ The web page lets you set:
 
 - radar centre and radius;
 - current, approximate, or searched location;
+- short location name shown at the bottom of the display;
 - OpenSky client credentials;
 - sweep animation and speed;
 - aircraft symbol;
