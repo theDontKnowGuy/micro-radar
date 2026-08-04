@@ -13,9 +13,6 @@
 const char* preconfiguredWifiSsid = "";
 const char* preconfiguredWifiPassword = "";
 
-constexpr int SCREEN_SIZE = 240;
-constexpr int SCREEN_SIZE_DIV_2 = (SCREEN_SIZE / 2);
-
 LGFX tft;
 LGFX_Sprite backbuffer(&tft);
 
@@ -35,7 +32,7 @@ void setup()
 
   // initialise LGFX + screen
   tft.init();
-  tft.invertDisplay(false); // GC9B72 doesn't need inversion (unlike the old GC9A01)
+  tft.invertDisplay(DISPLAY_INVERT); // differs per panel, see DisplayConfig.h
 
   backbuffer.setColorDepth(8);
   backbuffer.createSprite(SCREEN_SIZE, SCREEN_SIZE);

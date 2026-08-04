@@ -1,7 +1,7 @@
 #include "AircraftManager.h"
 
-constexpr int SCREEN_SIZE = 240;
-constexpr int SCREEN_SIZE_DIV_2 = (SCREEN_SIZE / 2);
+#include "DisplayConfig.h" // SCREEN_SIZE / SCREEN_SIZE_DIV_2, per selected panel
+
 constexpr unsigned long LABEL_LAYOUT_INTERVAL_MS = 1000;
 constexpr unsigned long WIND_FETCH_INTERVAL_MS = 15UL * 60UL * 1000UL;
 constexpr unsigned long WIND_RETRY_INTERVAL_MS = 60UL * 1000UL;
