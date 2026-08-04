@@ -7,6 +7,7 @@
 #include "HttpRequestManager.h"
 #include "OpenSkyAuthTokenHandler.h"
 #include "AircraftManager.h"
+#include "BootLogo.h"
 #include "DrawHelpers.h"
 
 // Optional hard-coded Wi-Fi credentials. Leave both blank to skip pre-baking them and use the setup hotspot instead.
@@ -30,6 +31,52 @@ unsigned long radarSweepPeriodMs = 5000;
 // frame-rate or memory regression; off by default so the log stays readable.
 constexpr bool LOG_FRAME_TIMING = false;
 
+void SecureWipe(void* data, size_t length)
+{
+  volatile uint8_t* bytes = static_cast<volatile uint8_t*>(data);
+  while (length-- > 0)
+    *bytes++ = 0;
+}
+
+void ShowBootLogo()
+{
+  tft.fillScreen(lgfx::color888(0, 0, 0));
+
+  lgfx::rgb565_t scanline[BootLogo::Width];
+  size_t runIndex = 0;
+  uint16_t runColor = 0;
+  uint16_t runRemaining = 0;
+  const int logoX = (SCREEN_SIZE - BootLogo::Width) / 2;
+  const int logoY = (SCREEN_SIZE - BootLogo::Height) / 2;
+
+  tft.startWrite();
+  for (uint16_t y = 0; y < BootLogo::Height; y++) {
+    for (uint16_t x = 0; x < BootLogo::Width; x++) {
+      if (runRemaining == 0 && runIndex < BootLogo::RunCount) {
+        const BootLogo::Run& run = BootLogo::Runs[runIndex++];
+        runColor = pgm_read_word(&run.color);
+        runRemaining = pgm_read_word(&run.length);
+      }
+
+      scanline[x] = lgfx::rgb565_t(runColor);
+      if (runRemaining > 0)
+        runRemaining--;
+    }
+
+    tft.pushImage(logoX, logoY + y, BootLogo::Width, 1, scanline);
+  }
+  tft.endWrite();
+
+  runIndex = 0;
+  runColor = 0;
+  runRemaining = 0;
+  SecureWipe(scanline, sizeof(scanline));
+
+  delay(5000);
+  tft.fillScreen(lgfx::color888(0, 0, 0));
+  tft.waitDMA();
+}
+
 void setup()
 {
   Serial.begin(115200);
@@ -38,6 +85,7 @@ void setup()
   // initialise LGFX + screen
   tft.init();
   tft.invertDisplay(DISPLAY_INVERT); // differs per panel, see DisplayConfig.h
+  ShowBootLogo();
 
   // At 360x360 the backbuffer is 129,600 bytes. Keeping that in SRAM leaves too
   // little contiguous heap for the TLS handshake OpenSky needs -- requests fail
