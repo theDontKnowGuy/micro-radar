@@ -203,6 +203,16 @@ void setup()
       SCREEN_SIZE / 2
     );
 
+    // Once the radar starts updating itself the version on screen is the only
+    // way to tell, at a glance, which build a given unit ended up on. Kept to
+    // the bare number here -- the release date and description are on the
+    // configuration page, where there is room for them.
+    tft.drawCentreString(
+      "v" FIRMWARE_VERSION,
+      SCREEN_SIZE / 2,
+      SCREEN_SIZE / 2 + lineHeight
+    );
+
     // Keep the address visible long enough to read while the asynchronous
     // configuration server is already available.
     delay(4000);

@@ -2,15 +2,18 @@
 #
 # Cuts a firmware release the radar can install over the air.
 #
-#   scripts/release.sh "Shows destination airport for arriving flights"
+#   scripts/release.sh
 #
 # Builds every release environment, publishes the binaries as a GitHub release
 # tagged from FIRMWARE_VERSION, and attaches the manifest.json that devices poll.
 #
-# The version comes from include/FirmwareVersion.h and nowhere else -- bump it
-# there, commit, then run this. That is what keeps the number compiled into the
-# binary identical to the number the manifest advertises; if they could drift,
-# a device would either re-install the same build forever or stop seeing updates.
+# Version, release date and notes all come from include/FirmwareVersion.h and
+# nowhere else -- edit them there, commit, then run this with no arguments. That
+# is what keeps the values compiled into the binary identical to the ones the
+# manifest advertises. It matters for more than tidiness: the configuration page
+# describes the running firmware from these same constants, so a release whose
+# notes were typed on the command line would leave every updated radar unable to
+# say what it is running.
 #
 # Devices read https://github.com/<repo>/releases/latest/download/manifest.json.
 # GitHub resolves "latest" to the most recent non-draft, non-prerelease release,
@@ -50,16 +53,38 @@ size_of() {
     fi
 }
 
-NOTES="${1:-}"
-[ -n "$NOTES" ] || die "usage: $(basename "$0") \"release notes\""
-
 command -v gh >/dev/null 2>&1 || die "gh CLI not found"
 [ -x "$PIO" ] || die "pio not found at $PIO (set PIO=...)"
 
-VERSION="$(sed -n 's/^#define FIRMWARE_VERSION "\(.*\)"$/\1/p' "$ROOT/include/FirmwareVersion.h")"
-[ -n "$VERSION" ] || die "could not read FIRMWARE_VERSION from include/FirmwareVersion.h"
+HEADER="$ROOT/include/FirmwareVersion.h"
+
+# Notes must not contain a double quote -- the value is a C string literal in
+# the header and is extracted here by matching to the closing quote.
+read_define() {
+    sed -n "s/^#define $1 \"\(.*\)\"\$/\1/p" "$HEADER"
+}
+
+VERSION="$(read_define FIRMWARE_VERSION)"
+RELEASED="$(read_define FIRMWARE_RELEASED)"
+NOTES="$(read_define FIRMWARE_NOTES)"
+
+[ -n "$VERSION" ] || die "could not read FIRMWARE_VERSION from $HEADER"
+[ -n "$RELEASED" ] || die "could not read FIRMWARE_RELEASED from $HEADER"
+[ -n "$NOTES" ] || die "could not read FIRMWARE_NOTES from $HEADER"
+
 echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' \
     || die "FIRMWARE_VERSION '$VERSION' is not MAJOR.MINOR.PATCH"
+echo "$RELEASED" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' \
+    || die "FIRMWARE_RELEASED '$RELEASED' is not YYYY-MM-DD"
+
+# The date is baked into the binary and shown on the configuration page for the
+# life of the build, so a forgotten bump is not a cosmetic problem -- every
+# radar would report the wrong release date until the next update.
+TODAY="$(date -u +%Y-%m-%d)"
+if [ "$RELEASED" != "$TODAY" ] && [ -z "${MICRO_RADAR_ALLOW_STALE_DATE:-}" ]; then
+    die "FIRMWARE_RELEASED is $RELEASED but today is $TODAY (UTC).
+  Update it in $HEADER, or set MICRO_RADAR_ALLOW_STALE_DATE=1 to publish as-is."
+fi
 
 TAG="v$VERSION"
 
@@ -76,6 +101,8 @@ if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
 fi
 
 echo "==> Releasing $TAG to $REPO"
+echo "    released $RELEASED"
+echo "    $NOTES"
 
 rm -rf "$STAGING"
 mkdir -p "$STAGING"
@@ -99,7 +126,7 @@ MANIFEST="$STAGING/manifest.json"
     echo "  \"version\": \"$VERSION\","
     printf '  "notes": '
     python3 -c 'import json,sys; print(json.dumps(sys.argv[1]) + ",")' "$NOTES"
-    echo "  \"released\": \"$(date -u +%Y-%m-%d)\","
+    echo "  \"released\": \"$RELEASED\","
     echo "  \"builds\": {"
 
     first=1

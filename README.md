@@ -143,19 +143,51 @@ The device polls `manifest.json`, a small file attached to the latest release:
 Each board only installs the image published under its own build key, so a
 360×360 GC9B72 binary is never offered to a 240×240 GC9A01 board.
 
+### Which version am I running?
+
+Each radar reports its own build in two places. The boot screen shows the bare
+version under the configuration address:
+
+```text
+Configure me at
+http://192.168.1.42
+v1.1.0
+```
+
+The configuration page carries the fuller story at the bottom — version,
+release date, and what changed:
+
+> **Firmware 1.1.0** · released 2026-08-05
+> Adds automatic over-the-air updates from GitHub.
+
+These describe the build that is *running*, not the newest one published, which
+is the distinction that matters once units start updating themselves at
+different times.
+
 ### Publishing a release
 
-1. Bump `FIRMWARE_VERSION` in [`include/FirmwareVersion.h`](include/FirmwareVersion.h) and commit.
-2. Run:
+1. Edit the three constants in [`include/FirmwareVersion.h`](include/FirmwareVersion.h) and commit:
+
+```c
+#define FIRMWARE_VERSION  "1.1.0"
+#define FIRMWARE_RELEASED "2026-08-05"
+#define FIRMWARE_NOTES    "Adds automatic over-the-air updates from GitHub."
+```
+
+2. Run it with no arguments:
 
 ```bash
-scripts/release.sh "Shows destination airport for arriving flights"
+scripts/release.sh
 ```
 
 That builds every release environment, tags the commit, computes the digests,
-writes the manifest, and publishes it all as a GitHub release. The version is
-read back out of the header rather than passed in, so the number compiled into
-the binary and the number the manifest advertises cannot drift apart.
+writes the manifest, and publishes it all as a GitHub release. Everything is
+read back out of the header rather than passed on the command line, so what is
+compiled into the binary and what the manifest advertises cannot drift apart —
+and the radar can describe itself offline. The script refuses to publish if
+`FIRMWARE_RELEASED` is not today's date; set `MICRO_RADAR_ALLOW_STALE_DATE=1`
+to override. Keep the notes free of double quotes: the value is a C string
+literal that the script extracts by matching to the closing quote.
 
 Set `MICRO_RADAR_REPO` to publish somewhere other than the default fork.
 Because GitHub resolves "latest" to the newest release that is neither a draft

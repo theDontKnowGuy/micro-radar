@@ -1,6 +1,8 @@
 #include "ConfigurationWebServer.h"
 #include <ESPmDNS.h>
 
+#include "FirmwareVersion.h"
+
 static String EscapeHtmlAttribute(const String& value) {
     String escaped;
     escaped.reserve(value.length());
@@ -165,6 +167,21 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                 margin: .1rem 0 .2rem;
                 color: var(--muted);
                 font-size: .84rem;
+            }
+            .firmware-footer {
+                margin: 1.1rem 0 0;
+                padding-top: .8rem;
+                border-top: 1px solid var(--line);
+                color: var(--muted);
+                font-size: .78rem;
+                line-height: 1.45;
+            }
+            .firmware-version {
+                color: var(--green);
+                font-weight: 650;
+            }
+            .firmware-notes {
+                margin: .2rem 0 0;
             }
             .config-form {
                 display: flex;
@@ -693,6 +710,12 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                     <div id="result" aria-live="polite"></div>
                 </div>
             </form>
+
+            <div class="firmware-footer">
+                <span class="firmware-version">Firmware %FIRMWARE_VERSION%</span>
+                &middot; released %FIRMWARE_RELEASED%
+                <p class="firmware-notes">%FIRMWARE_NOTES%</p>
+            </div>
         </fieldset>
 
         <script>
@@ -1072,6 +1095,14 @@ void ConfigurationWebServer::Initialise() {
                 if (var == "MARKER_RADAR_SELECTED") return aircraftMarker == "radar" ? "selected" : "";
                 if (var == "MARKER_TRIANGLE_SELECTED") return aircraftMarker == "triangle" ? "selected" : "";
                 if (var == "MARKER_DOT_SELECTED") return aircraftMarker == "dot" ? "selected" : "";
+
+                // Describes the build that is actually running, which after an
+                // over-the-air update is not necessarily the one that was
+                // flashed over USB. Escaped because the notes are free text
+                // edited by hand in FirmwareVersion.h.
+                if (var == "FIRMWARE_VERSION")  return EscapeHtmlAttribute(FIRMWARE_VERSION);
+                if (var == "FIRMWARE_RELEASED") return EscapeHtmlAttribute(FIRMWARE_RELEASED);
+                if (var == "FIRMWARE_NOTES")    return EscapeHtmlAttribute(FIRMWARE_NOTES);
                 return "";
             }
         );
