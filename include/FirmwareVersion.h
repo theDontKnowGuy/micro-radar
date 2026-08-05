@@ -9,7 +9,7 @@
 //
 // Format is MAJOR.MINOR.PATCH. FirmwareUpdater compares the three components
 // numerically rather than as text, so 1.10.0 correctly sorts above 1.9.0.
-#define FIRMWARE_VERSION "1.0.0"
+#define FIRMWARE_VERSION "1.1.0"
 
 // Identifies which hardware build this binary is for. Set per environment in
 // platformio.ini and used as the key into the manifest's "builds" object, so
