@@ -9,6 +9,8 @@
 #include "AircraftManager.h"
 #include "BootLogo.h"
 #include "DrawHelpers.h"
+#include "FirmwareUpdater.h"
+#include "FirmwareVersion.h"
 
 // Optional hard-coded Wi-Fi credentials. Leave both blank to skip pre-baking them and use the setup hotspot instead.
 const char* preconfiguredWifiSsid = "";
@@ -23,6 +25,7 @@ HttpRequestManager http;
 OpenSkyAuthTokenHandler authHandler(http);
 
 AircraftManager aircraftManager(configServer, authHandler, http);
+FirmwareUpdater firmwareUpdater;
 bool renderRadarSweep = true;
 unsigned long radarSweepPeriodMs = 5000;
 
@@ -75,6 +78,70 @@ void ShowBootLogo()
   delay(5000);
   tft.fillScreen(lgfx::color888(0, 0, 0));
   tft.waitDMA();
+}
+
+// Takes the panel over for the duration of a firmware download. Called from the
+// render loop, so no sprite push is in flight and drawing straight to the
+// display is safe here even though it is not during normal operation.
+void RunFirmwareUpdate()
+{
+  const FirmwareUpdater::Release release = firmwareUpdater.PendingRelease();
+  Serial.printf("Updating firmware: %s -> %s\n", FIRMWARE_VERSION, release.version.c_str());
+
+  // A firmware download and an OpenSky fetch both want a TLS session, and this
+  // board does not have the contiguous heap for two.
+  aircraftManager.SuspendNetworkTask();
+
+  tft.waitDMA();
+  tft.fillScreen(lgfx::color888(0, 0, 0));
+  // Opaque text: the percentage below is redrawn in place, and without a
+  // background colour each repaint would smear over the last one.
+  tft.setTextColor(lgfx::color888(0, 255, 0), lgfx::color888(0, 0, 0));
+
+  const int lineHeight = tft.fontHeight() + 10;
+  tft.drawCentreString("Updating firmware", SCREEN_SIZE_DIV_2, SCREEN_SIZE_DIV_2 - lineHeight * 2);
+  tft.drawCentreString(release.version, SCREEN_SIZE_DIV_2, SCREEN_SIZE_DIV_2 - lineHeight);
+
+  constexpr int BAR_HEIGHT = 16;
+  const int barWidth = SCREEN_SIZE / 2;
+  const int barX = (SCREEN_SIZE - barWidth) / 2;
+  const int barY = SCREEN_SIZE_DIV_2 + lineHeight;
+  tft.drawRect(barX, barY, barWidth, BAR_HEIGHT, lgfx::color888(0, 255, 0));
+
+  // Redraw only when the whole-percent figure moves. The download is ~1.3MB in
+  // small chunks, and repainting the bar on every one of them would put more
+  // SPI traffic in the way of the transfer than the progress is worth.
+  int lastPercent = -1;
+  const bool installed = firmwareUpdater.Install(release,
+    [&](size_t written, size_t total) {
+      const int percent = static_cast<int>((written * 100) / total);
+      if (percent == lastPercent)
+        return;
+      lastPercent = percent;
+
+      const int fill = ((barWidth - 4) * percent) / 100;
+      tft.fillRect(barX + 2, barY + 2, fill, BAR_HEIGHT - 4, lgfx::color888(0, 255, 0));
+      tft.drawCentreString(String(percent) + "%   ", SCREEN_SIZE_DIV_2, barY + BAR_HEIGHT + 10);
+    });
+
+  if (installed) {
+    tft.fillScreen(lgfx::color888(0, 0, 0));
+    tft.drawCentreString("Restarting", SCREEN_SIZE_DIV_2, SCREEN_SIZE_DIV_2);
+    delay(1000);
+    tft.waitDMA();
+    ESP.restart();
+  }
+
+  // The running firmware is untouched -- a failed write only dirties the
+  // inactive slot -- but the network worker was suspended above and cannot be
+  // resumed safely, so the radar would sit on stale aircraft. Reboot instead:
+  // it comes back on the current version and retries an hour later.
+  tft.fillScreen(lgfx::color888(0, 0, 0));
+  tft.drawCentreString("Update failed", SCREEN_SIZE_DIV_2, SCREEN_SIZE_DIV_2 - lineHeight);
+  tft.drawCentreString("Restarting", SCREEN_SIZE_DIV_2, SCREEN_SIZE_DIV_2);
+  delay(3000);
+  tft.waitDMA();
+  ESP.restart();
 }
 
 void setup()
@@ -144,6 +211,10 @@ void setup()
   // initialise aircraft manager
   aircraftManager.Initialise();
 
+  // Start polling GitHub for new firmware. Needs Wi-Fi, so it goes after
+  // autoConnect; the checker delays its first look by a couple of minutes.
+  firmwareUpdater.Initialise();
+
   // Read display configuration once. Reading Preferences in every frame
   // causes visible NVS-related frame-time spikes.
   const String scanlineSetting = configServer.GetStoredString("scanline");
@@ -163,6 +234,14 @@ void loop()
     delay(200);   // let the HTTP response finish going out
     tft.waitDMA(); // make sure the panel bus is idle
     ESP.restart();
+  }
+
+  // Same reasoning as the restart above: the updater's background task found a
+  // new release, but the flash and reboot happen here, between frames, with the
+  // panel idle.
+  if (firmwareUpdater.UpdatePending()) {
+    RunFirmwareUpdate();
+    return;
   }
 
   aircraftManager.Update();

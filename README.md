@@ -105,6 +105,94 @@ pio run -e esp32-s3-gc9b72 -t upload -t monitor
 
 The serial monitor runs at `115200` baud. If uploading fails, use your board's BOOT/RESET upload sequence.
 
+> **Upgrading from a build before over-the-air updates:** the partition table
+> changed from `huge_app.csv` to [`partitions_ota.csv`](partitions_ota.csv), and
+> flashing a new partition table erases NVS. The first serial upload after this
+> change wipes saved Wi-Fi credentials and every setting from the web UI, so the
+> radar comes back up in setup-hotspot mode. This happens once — later OTA
+> updates only rewrite an app slot and leave settings alone.
+
+## Over-the-air updates
+
+The radar checks GitHub for new firmware once an hour and installs anything
+newer on its own. No button to press and nothing to upload: publish a release
+and the fleet picks it up within the hour.
+
+**How it works.** Flash holds two app slots. The running firmware downloads a
+new image into the slot it is *not* executing from, checks it against the MD5
+published in the manifest, and only then points the bootloader at it and
+reboots. A download interrupted by a dropped Wi-Fi connection, a truncated
+transfer, or a bad digest leaves the running firmware completely untouched — the
+worst case is that the radar reboots on the version it already had and tries
+again an hour later.
+
+The device polls `manifest.json`, a small file attached to the latest release:
+
+```json
+{
+  "version": "1.1.0",
+  "notes": "Shows destination airport for arriving flights",
+  "released": "2026-08-05",
+  "builds": {
+    "esp32-s3-gc9b72":    { "url": "...", "md5": "...", "size": 1318096 },
+    "esp32-s3-devkitm-1": { "url": "...", "md5": "...", "size": 1285744 }
+  }
+}
+```
+
+Each board only installs the image published under its own build key, so a
+360×360 GC9B72 binary is never offered to a 240×240 GC9A01 board.
+
+### Publishing a release
+
+1. Bump `FIRMWARE_VERSION` in [`include/FirmwareVersion.h`](include/FirmwareVersion.h) and commit.
+2. Run:
+
+```bash
+scripts/release.sh "Shows destination airport for arriving flights"
+```
+
+That builds every release environment, tags the commit, computes the digests,
+writes the manifest, and publishes it all as a GitHub release. The version is
+read back out of the header rather than passed in, so the number compiled into
+the binary and the number the manifest advertises cannot drift apart.
+
+Set `MICRO_RADAR_REPO` to publish somewhere other than the default fork.
+Because GitHub resolves "latest" to the newest release that is neither a draft
+nor a prerelease, **marking a release as a prerelease is how you stage a build
+without shipping it to every radar in the field**.
+
+### Security
+
+The update channel can execute arbitrary code on the device, so it does not
+trust the internet's CAs at large. TLS is pinned to the two roots in
+[`include/UpdateRootCAs.h`](include/UpdateRootCAs.h) — one covering `github.com`
+and one covering `*.githubusercontent.com`, which the release-asset redirect
+lands on. Downloads are refused from any other host, and the image must match
+the manifest's MD5 before it is allowed to boot.
+
+If GitHub ever changes certificate issuers, update checks start failing with a
+TLS error in the serial log and the radar keeps running its current firmware.
+Re-pin with:
+
+```bash
+scripts/generate_ca_header.sh
+```
+
+### Watching it happen
+
+Update activity is logged over serial with an `[OTA]` prefix:
+
+```text
+[OTA] Running 1.0.0 (build esp32-s3-gc9b72)
+[OTA] Update available: 1.0.0 -> 1.1.0 (1318096 bytes)
+[OTA] 1.1.0 written and verified
+```
+
+The first check runs two minutes after boot, then hourly. During an install the
+panel shows a progress bar and the radar stops tracking aircraft until it
+reboots.
+
 ## Setup
 
 On first boot, connect to:

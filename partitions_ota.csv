@@ -1,0 +1,30 @@
+# Dual-slot OTA layout for an 8MB flash, replacing huge_app.csv.
+#
+# huge_app declares a single app partition (ota_0 only), so there is nowhere to
+# write a downloaded image and self-updating is impossible with it. This table
+# declares ota_0 and ota_1, and the bootloader alternates between them: the
+# running firmware writes the new image into the slot it is not executing from,
+# flips otadata, and reboots. A download that fails or is interrupted leaves the
+# running slot untouched, so a dropped Wi-Fi connection mid-update is harmless.
+#
+# Each app slot is 0x330000 = 3,342,336 bytes. The 360x360 build is around
+# 1.3MB, so roughly 40% is in use -- there is a lot of headroom for growth.
+#
+# Sized for 8MB because that is the smaller of the two possible modules; the
+# table is equally valid on a 16MB part, it just leaves the top 8MB unused. If
+# you confirm 16MB flash (esptool.py flash_id) you can grow both app slots.
+#
+# App partitions must start on a 0x10000 boundary -- keep that in mind if you
+# resize anything above them.
+#
+# Changing the partition table erases NVS, so Wi-Fi credentials and all settings
+# saved through the web UI are lost the first time you flash this over serial.
+# They survive every subsequent OTA, because OTA only rewrites an app slot.
+
+# Name,     Type, SubType, Offset,   Size,     Flags
+nvs,        data, nvs,     0x9000,   0x5000,
+otadata,    data, ota,     0xe000,   0x2000,
+app0,       app,  ota_0,   0x10000,  0x330000,
+app1,       app,  ota_1,   0x340000, 0x330000,
+spiffs,     data, spiffs,  0x670000, 0x180000,
+coredump,   data, coredump,0x7F0000, 0x10000,

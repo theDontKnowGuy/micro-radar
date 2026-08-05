@@ -21,34 +21,33 @@ T          = 2.0        # plywood thickness (mm)
 FW_TARGET  = 5.0        # target finger width (mm)
 BURN       = 0.10       # LightBurn kerf-compensation note (mm)
 
-# External dimensions (mm), coords: X = forward (from back), Y = up (from floor)
-BACK_HEIGHT   = 70.0    # vertical back wall
-TOP_DEPTH     = 32.0    # top horizontal length (from back)
-MAIN_DEPTH    = 58.0    # back to base of panel (desk-back position)
-DESK_DEPTH    = 16.0    # horizontal length of the desk ledge
-KICK_H        = 18.0    # height of the desk above the floor
-KICK_BACK     = 6.0     # how far the kik face recedes BACKWARD going down
-                        # (desk-front overhangs the floor-front by this much)
-WIDTH_EXT     = 75.0    # box external width
-WIDTH_INT     = WIDTH_EXT - 2 * T   # 71 mm between the Sides
+# External dimensions (mm)
+BACK_HEIGHT   = 92.0      # was 70
+TOP_DEPTH     = 42.0      # was 32
+MAIN_DEPTH    = 84.0      # was 58
+DESK_DEPTH    = 20.0      # was 16
+KICK_H        = 22.0      # was 18
+KICK_BACK     = 6.0       # unchanged
+WIDTH_EXT     = 100.0     # was 75
+WIDTH_INT     = WIDTH_EXT - 2 * T
 
 # Derived geometry
-DESK_FRONT    = MAIN_DEPTH + DESK_DEPTH          # most-forward point (76 mm)
-FLOOR_LEN     = DESK_FRONT - KICK_BACK           # floor stops short: 70 mm
-PANEL_LEN     = math.hypot(MAIN_DEPTH - TOP_DEPTH, BACK_HEIGHT - KICK_H)
+DESK_FRONT    = MAIN_DEPTH + DESK_DEPTH
+FLOOR_LEN     = DESK_FRONT - KICK_BACK
+PANEL_LEN     = math.hypot(MAIN_DEPTH - TOP_DEPTH,
+                           BACK_HEIGHT - KICK_H)
 KICK_LEN      = math.hypot(KICK_BACK, KICK_H)
 
-# GC9A01 1.28" 240x240 round display module cutout: the visible glass is a
-# circle, but the module has a "chin" below it (folded ribbon area under the
-# glass) that must also pass through the panel — so the hole is a circle
-# merged with a trapezoid hanging off its bottom.
-LENS_DIA      = 33.0    # glass circle diameter (mm)
-CHIN_TOP_W    = 20.0    # trapezoid width where it meets the circle (mm)
-CHIN_BOT_W    = 15.0    # trapezoid width at its bottom (mm)
-CHIN_H        = 6.0     # trapezoid height below the circle chord (mm)
-MNT_HOLE_DIA  = 4.0     # display mounting holes (mm), 2 at diagonal corners
-MNT_OFFSET_X  = 14.37
-MNT_OFFSET_Y  = 14.37
+# TFT opening
+LENS_DIA      = 55.5      # new TFT diameter
+CHIN_TOP_W    = 16.0      # proportional increase
+CHIN_BOT_W    = 12.0
+CHIN_H        = 3.0
+
+# Mounting
+MNT_HOLE_DIA  = 4.0
+MNT_OFFSET_X  = 24.0      # update to your module's actual PCB
+MNT_OFFSET_Y  = 24.0
 
 # SVG page
 PAGE_MARGIN = 15.0

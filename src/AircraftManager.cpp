@@ -113,6 +113,25 @@ void AircraftManager::Update()
     ResolveNextDestination();
 }
 
+void AircraftManager::SuspendNetworkTask()
+{
+    if (networkTaskHandle == nullptr)
+        return;
+
+    // Suspending can catch the worker mid-request and orphan its socket. That
+    // is acceptable here and nowhere else: the caller is about to either reboot
+    // into new firmware or reboot after a failed one, so nothing outlives it.
+    vTaskSuspend(networkTaskHandle);
+
+    // Stop Update() from queueing further work if it runs again before the
+    // reboot -- with the worker suspended those jobs would never be picked up
+    // and networkBusy would stay latched.
+    if (networkStateMutex != nullptr && xSemaphoreTake(networkStateMutex, portMAX_DELAY) == pdTRUE) {
+        networkBusy = true;
+        xSemaphoreGive(networkStateMutex);
+    }
+}
+
 void AircraftManager::NetworkTaskEntry(void* context)
 {
     static_cast<AircraftManager*>(context)->NetworkTaskLoop();

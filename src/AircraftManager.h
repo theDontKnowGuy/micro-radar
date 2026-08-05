@@ -138,6 +138,15 @@ public:
 
     void Initialise();
     void Update();
+
+    // Stops the background network worker for good. Called before a firmware
+    // download so the OTA transfer is not competing with an OpenSky fetch for
+    // heap -- two TLS sessions at once is exactly the pressure that produced
+    // "SSL - Memory allocation failed" on this board. There is no resume,
+    // because the only paths out of an install are a reboot or a failure that
+    // is followed by one.
+    void SuspendNetworkTask();
+
     void Draw(
         LGFX_Sprite& backbuffer,
         float sweepAngle,
