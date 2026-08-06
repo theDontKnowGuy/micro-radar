@@ -2,6 +2,8 @@
 
 #include "DisplayConfig.h" // SCREEN_SIZE / SCREEN_SIZE_DIV_2, per selected panel
 
+#include <ctime>
+
 constexpr unsigned long LABEL_LAYOUT_INTERVAL_MS = 1000;
 constexpr unsigned long WIND_FETCH_INTERVAL_MS = 15UL * 60UL * 1000UL;
 constexpr unsigned long WIND_RETRY_INTERVAL_MS = 60UL * 1000UL;
@@ -21,6 +23,77 @@ constexpr int UPDATE_LABEL_WIDTH = 84;
 constexpr int UPDATE_LABEL_HEIGHT = 11;
 constexpr int UPDATE_LABEL_X = (SCREEN_SIZE - UPDATE_LABEL_WIDTH) / 2;
 constexpr int UPDATE_LABEL_Y = LOCATION_LABEL_Y - UPDATE_LABEL_HEIGHT - 3;
+
+// The clock. Drawn in LovyanGFX's seven-segment face, which is 48 rows tall
+// with 32-wide digits and a 12-wide colon -- 140 for "00:00" -- scaled up from
+// there. The scale is applied in 16.16 fixed point by the font renderer, so a
+// fractional one is exact rather than rounded to whole pixels.
+constexpr unsigned long TIMEZONE_FETCH_INTERVAL_MS = 6UL * 60UL * 60UL * 1000UL;
+constexpr unsigned long TIMEZONE_RETRY_INTERVAL_MS = 60UL * 1000UL;
+// Change the scale and nothing else: the two below follow from it, and the
+// static_asserts further down re-check the placement against the round face at
+// whatever size that leaves. Rounded up rather than truncated, so the reserved
+// region is never a pixel narrower than what is actually drawn in it.
+constexpr int CLOCK_FONT_HEIGHT = 48;   // Font7, unscaled
+constexpr int CLOCK_FONT_WIDTH = 140;   // "00:00" in Font7, unscaled
+constexpr float CLOCK_TEXT_SCALE = 1.3f;
+constexpr int CLOCK_DIGIT_HEIGHT = static_cast<int>(CLOCK_FONT_HEIGHT * CLOCK_TEXT_SCALE) + 1;
+constexpr int CLOCK_DIGITS_WIDTH = static_cast<int>(CLOCK_FONT_WIDTH * CLOCK_TEXT_SCALE) + 1;
+
+// The 12-hour format hangs AM/PM off the top right of the digits rather than
+// setting it on their baseline. On a round panel the rows under the digits are
+// the narrowest part of the face, and at this size the suffix does not fit
+// beside them there -- level with their top row it has width to spare.
+constexpr int CLOCK_SUFFIX_TEXT_SIZE = 3;
+constexpr int CLOCK_SUFFIX_GAP = 6;
+constexpr int CLOCK_SUFFIX_WIDTH = 2 * 6 * CLOCK_SUFFIX_TEXT_SIZE; // "AM" in the default font
+
+// Reserved for the label solver as the union of the two: the digits are centred
+// on the face and the suffix overhangs to the right of them, so this does not
+// sit centred the way the smaller labels do.
+constexpr int CLOCK_LABEL_HEIGHT = CLOCK_DIGIT_HEIGHT;
+constexpr int CLOCK_LABEL_WIDTH = CLOCK_DIGITS_WIDTH + CLOCK_SUFFIX_GAP + CLOCK_SUFFIX_WIDTH;
+constexpr int CLOCK_LABEL_X = (SCREEN_SIZE - CLOCK_DIGITS_WIDTH) / 2;
+constexpr int CLOCK_LABEL_Y = UPDATE_LABEL_Y - CLOCK_LABEL_HEIGHT - 6;
+
+// Both constraints on the placement, checked here because neither is visible
+// by inspection and one of them only bites some of the time: the digits must
+// clear the update notice, which is on screen only while a release is waiting,
+// and every corner of the block must fall inside the round face, which crops
+// hardest at exactly the rows this sits in. Squared distances rather than a
+// radius, so it stays integer arithmetic a compiler can do.
+constexpr int CLOCK_FACE_CENTRE = SCREEN_SIZE_DIV_2 - 1;
+constexpr int CLOCK_CORNER_DX = CLOCK_LABEL_X + CLOCK_DIGITS_WIDTH - CLOCK_FACE_CENTRE;
+constexpr int CLOCK_CORNER_DY = CLOCK_LABEL_Y + CLOCK_LABEL_HEIGHT - CLOCK_FACE_CENTRE;
+constexpr int CLOCK_SUFFIX_DX = CLOCK_LABEL_X + CLOCK_LABEL_WIDTH - CLOCK_FACE_CENTRE;
+constexpr int CLOCK_SUFFIX_DY =
+    CLOCK_LABEL_Y + 8 * CLOCK_SUFFIX_TEXT_SIZE - CLOCK_FACE_CENTRE;
+
+static_assert(
+    CLOCK_LABEL_Y + CLOCK_LABEL_HEIGHT < UPDATE_LABEL_Y,
+    "The clock overlaps the update notice; move it up or shrink the digits"
+);
+static_assert(
+    CLOCK_CORNER_DX * CLOCK_CORNER_DX + CLOCK_CORNER_DY * CLOCK_CORNER_DY <
+        CLOCK_FACE_CENTRE * CLOCK_FACE_CENTRE,
+    "The clock digits fall outside the round face; move them up or shrink them"
+);
+static_assert(
+    CLOCK_SUFFIX_DX * CLOCK_SUFFIX_DX + CLOCK_SUFFIX_DY * CLOCK_SUFFIX_DY <
+        CLOCK_FACE_CENTRE * CLOCK_FACE_CENTRE,
+    "The AM/PM suffix falls outside the round face; shrink it or close the gap"
+);
+
+// Before NTP answers, the system clock reads from the start of 1970. Anything
+// earlier than this is a clock that has not been set rather than one that is
+// merely wrong, and the radar shows nothing at all rather than a plausible
+// time that happens to be false.
+constexpr time_t CLOCK_SYNCED_AFTER = 1700000000; // 2023-11-14
+
+// Dimmer than the aircraft green: the clock is furniture, not a target.
+constexpr int CLOCK_COLOR_R = 00;
+constexpr int CLOCK_COLOR_G = 220;
+constexpr int CLOCK_COLOR_B = 0;
 
 #include <ArduinoJson.h>
 #include <algorithm>
@@ -78,6 +151,8 @@ void AircraftManager::Initialise()
     const String altitudeUnit = configServer.GetStoredString("altitude-unit");
     const String renderDestination = configServer.GetStoredString("destination");
     const String renderWind = configServer.GetStoredString("wind");
+    const String renderClock = configServer.GetStoredString("clock");
+    const String clockFormatSetting = configServer.GetStoredString("clock-format");
     const String markerStyle = configServer.GetStoredString("aircraft-marker");
     locationNameLabel = configServer.GetStoredString("location-name");
     locationNameLabel.trim();
@@ -89,6 +164,10 @@ void AircraftManager::Initialise()
     if (!altitudeUnit.isEmpty()) displayAltitudeInFeet = altitudeUnit == "feet" || altitudeUnit == "kft";
     if (!renderDestination.isEmpty()) displayDestination = renderDestination == "true";
     if (!renderWind.isEmpty()) displayWind = renderWind == "true";
+    if (!renderClock.isEmpty()) displayClock = renderClock == "true";
+    clockFormat = clockFormatSetting == "12h"
+        ? ClockFormat::TwelveHour
+        : ClockFormat::TwentyFourHour;
     if (markerStyle == "triangle")
         aircraftMarkerStyle = AircraftMarkerStyle::Triangle;
     else if (markerStyle == "dot")
@@ -154,6 +233,18 @@ void AircraftManager::Update()
         }
     }
 
+    // Re-read every few hours rather than once: this is also how the radar
+    // finds out that summer time has started or ended where it is pointed.
+    if (displayClock) {
+        const unsigned long timezoneInterval =
+            hasUtcOffset.load() ? TIMEZONE_FETCH_INTERVAL_MS : TIMEZONE_RETRY_INTERVAL_MS;
+        if ((!hasScheduledTimezoneFetch || now - lastTimezoneFetch >= timezoneInterval) &&
+            ScheduleNetworkJob(NetworkJobType::FetchTimezone)) {
+            lastTimezoneFetch = now;
+            hasScheduledTimezoneFetch = true;
+        }
+    }
+
     ResolveNextDestination();
 }
 
@@ -210,6 +301,10 @@ void AircraftManager::NetworkTaskLoop()
 
             case NetworkJobType::FetchWind:
                 RunWindFetch();
+                break;
+
+            case NetworkJobType::FetchTimezone:
+                RunTimezoneFetch();
                 break;
 
             case NetworkJobType::ResolveDestination:
@@ -429,6 +524,54 @@ void AircraftManager::RunWindFetch()
     });
 }
 
+void AircraftManager::RunTimezoneFetch()
+{
+    // The same host the wind comes from, asked for the one field the clock
+    // needs. `timezone=auto` is what makes the answer the zone the coordinates
+    // fall in; `current=is_day` is the smallest reading that will persuade the
+    // API to answer at all. The offset is for right now, so summer time is
+    // already in it -- there is nothing here for the firmware to work out.
+    const HttpResult result = http.Get(
+        "https://api.open-meteo.com/v1/forecast",
+        {
+            {"latitude", String(lat, 6)},
+            {"longitude", String(lon, 6)},
+            {"current", "is_day"},
+            {"timezone", "auto"}
+        }
+    );
+
+    bool fetchedOffset = false;
+    long offsetSeconds = 0;
+    if (!IsSuccessful(result)) {
+        LogRequestFailure("Timezone API", result);
+    } else {
+        JsonDocument doc;
+        const DeserializationError error = deserializeJson(doc, result.response);
+        const JsonVariant offsetValue = doc["utc_offset_seconds"];
+
+        // A whole-day offset either way covers every real zone; anything
+        // outside it is a malformed answer rather than a remote island.
+        if (!error && !offsetValue.isNull()) {
+            const long candidate = offsetValue.as<long>();
+            if (candidate > -86400 && candidate < 86400) {
+                offsetSeconds = candidate;
+                fetchedOffset = true;
+            }
+        }
+
+        if (!fetchedOffset)
+            LogParseFailure("Timezone", error, "missing or implausible utc_offset_seconds");
+    }
+
+    PublishNetworkResult([&] {
+        if (fetchedOffset) {
+            completedUtcOffsetSeconds = offsetSeconds;
+            timezoneFetchReady = true;
+        }
+    });
+}
+
 void AircraftManager::RunDestinationLookup(const String& icao, const String& callsign)
 {
     String safeCallsign;
@@ -482,6 +625,8 @@ void AircraftManager::ConsumeNetworkResults()
     bool hasRouteLookup = false;
     String fetchedWindLabel;
     bool hasWindFetch = false;
+    long fetchedUtcOffsetSeconds = 0;
+    bool hasTimezoneFetch = false;
     std::vector<LabelLayoutResult> labelLayout;
     bool hasLabelLayout = false;
 
@@ -504,6 +649,11 @@ void AircraftManager::ConsumeNetworkResults()
             completedWindLabel = "";
             windFetchReady = false;
             hasWindFetch = true;
+        }
+        if (timezoneFetchReady) {
+            fetchedUtcOffsetSeconds = completedUtcOffsetSeconds;
+            timezoneFetchReady = false;
+            hasTimezoneFetch = true;
         }
         if (labelLayoutReady) {
             labelLayout.swap(completedLabelLayout);
@@ -553,6 +703,16 @@ void AircraftManager::ConsumeNetworkResults()
     if (hasWindFetch) {
         windLabel = fetchedWindLabel;
         lastWindUpdate = millis();
+    }
+
+    if (hasTimezoneFetch) {
+        utcOffsetSeconds = fetchedUtcOffsetSeconds;
+        // The clock is a reserved region for the label solver, and it only
+        // becomes one once there is a time to show.
+        if (!hasUtcOffset.load()) {
+            hasUtcOffset.store(true);
+            labelLayoutDirty = true;
+        }
     }
 
     if (hasLabelLayout) {
@@ -789,6 +949,7 @@ void AircraftManager::Draw(
     }
 
     DrawWindInfo(backbuffer);
+    DrawClock(backbuffer);
     DrawLocationInfo(backbuffer);
     DrawUpdateNotice(backbuffer);
 }
@@ -1269,6 +1430,16 @@ void AircraftManager::SolveAircraftLabels(std::vector<RenderAircraft>& aircraft)
             addReservedLabelCost(windBox);
         }
 
+        if (displayClock && hasUtcOffset.load()) {
+            const LabelBox clockBox = {
+                CLOCK_LABEL_X,
+                CLOCK_LABEL_Y,
+                CLOCK_LABEL_WIDTH,
+                CLOCK_LABEL_HEIGHT
+            };
+            addReservedLabelCost(clockBox);
+        }
+
         if (!locationNameLabel.isEmpty()) {
             const LabelBox locationBox = {
                 LOCATION_LABEL_X,
@@ -1562,6 +1733,68 @@ void AircraftManager::DrawWindInfo(LGFX_Sprite& backbuffer) const
         SCREEN_SIZE_DIV_2,
         WIND_LABEL_Y
     );
+}
+
+void AircraftManager::DrawClock(LGFX_Sprite& backbuffer) const
+{
+    if (!displayClock || !hasUtcOffset.load())
+        return;
+
+    const time_t utcNow = time(nullptr);
+    if (utcNow < CLOCK_SYNCED_AFTER)
+        return;
+
+    // gmtime_r on a shifted timestamp rather than localtime_r on a real one:
+    // the C library's idea of local time is whatever is in TZ, and TZ cannot
+    // name the zone the radar is pointed at without a database this chip does
+    // not carry.
+    const time_t localNow = utcNow + utcOffsetSeconds;
+    struct tm parts = {};
+    gmtime_r(&localNow, &parts);
+
+    char digits[8];
+    const char* suffix = nullptr;
+    if (clockFormat == ClockFormat::TwelveHour) {
+        int hour = parts.tm_hour % 12;
+        if (hour == 0)
+            hour = 12;
+        // No leading zero on a 12-hour clock -- the block is centred on what it
+        // actually measures, so a single-digit hour simply sits narrower.
+        snprintf(digits, sizeof(digits), "%d:%02d", hour, parts.tm_min);
+        suffix = parts.tm_hour < 12 ? "AM" : "PM";
+    } else {
+        snprintf(digits, sizeof(digits), "%02d:%02d", parts.tm_hour, parts.tm_min);
+    }
+
+    backbuffer.setTextColor(lgfx::color888(CLOCK_COLOR_R, CLOCK_COLOR_G, CLOCK_COLOR_B));
+
+    // The digits are centred on the face on their own. The suffix hangs off
+    // their right rather than being counted into the centring: it is a modifier
+    // on the time, and a clock whose digits shift sideways twice a day to make
+    // room for it does not read as centred at all.
+    backbuffer.setFont(&fonts::Font7);
+    backbuffer.setTextSize(CLOCK_TEXT_SCALE);
+    const int digitsWidth = backbuffer.textWidth(digits);
+    const int x = (SCREEN_SIZE - digitsWidth) / 2;
+    backbuffer.drawString(digits, x, CLOCK_LABEL_Y);
+
+    // Everything else on the face draws in the default font at the default
+    // scale, and both are global state on the sprite.
+    backbuffer.setFont(&fonts::Font0);
+    backbuffer.setTextSize(1);
+
+    // The seven-segment face has no letters, so AM/PM is drawn in the default
+    // font, level with the top of the digits -- see the note on the layout
+    // constants for why it is not on their baseline.
+    if (suffix != nullptr) {
+        backbuffer.setTextSize(CLOCK_SUFFIX_TEXT_SIZE);
+        backbuffer.drawString(
+            suffix,
+            x + digitsWidth + CLOCK_SUFFIX_GAP,
+            CLOCK_LABEL_Y
+        );
+        backbuffer.setTextSize(1);
+    }
 }
 
 void AircraftManager::DrawLocationInfo(LGFX_Sprite& backbuffer) const
