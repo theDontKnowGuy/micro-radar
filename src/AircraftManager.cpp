@@ -1572,7 +1572,7 @@ void AircraftManager::DrawUpdateNotice(LGFX_Sprite& backbuffer) const
     backbuffer.setTextSize(1);
     backbuffer.setTextColor(lgfx::color888(220, 150, 0));
     backbuffer.drawCentreString(
-        "Update avail.",
+        "Update available",
         SCREEN_SIZE_DIV_2,
         UPDATE_LABEL_Y
     );

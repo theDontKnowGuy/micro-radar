@@ -256,6 +256,17 @@ static const char CONFIG_HTML[] PROGMEM = R"(
             .firmware-update {
                 margin: .45rem 0 0;
             }
+            .project-footer {
+                margin: .8rem 0 0;
+                padding-top: .8rem;
+                border-top: 1px solid var(--line);
+                color: var(--muted);
+                font-size: .78rem;
+                line-height: 1.45;
+            }
+            .project-credit {
+                margin: .2rem 0 0;
+            }
             .link-button {
                 border: 0;
                 padding: 0;
@@ -961,6 +972,18 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                     <button type="button" id="check-update" class="link-button">Check for updates now</button>
                     <button type="button" id="install-update" class="link-button" hidden>Install now</button>
                     <span id="update-status" aria-live="polite"></span>
+                </p>
+            </div>
+
+            <div class="project-footer">
+                <a href="https://github.com/thedontknowguy/micro-radar" target="_blank" rel="noopener"
+                   class="underline">Micro Radar on GitHub</a>
+                <p class="project-credit">
+                    A fork of the original
+                    <a href="https://github.com/AnthonySturdy/micro-radar" target="_blank" rel="noopener"
+                       class="underline">Micro Radar</a>
+                    by Anthony Sturdy. Full credit to Anthony for the original project, firmware,
+                    enclosure, and design.
                 </p>
             </div>
         </fieldset>
