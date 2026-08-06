@@ -84,6 +84,7 @@ struct PageValues {
     String openskyClientId, openskySecretPlaceholder, geocoderUrl;
     String scanlineEnabled, sweepPeriod, speedEnabled, speedUnit;
     String altitudeEnabled, altitudeUnit, destinationEnabled, windEnabled;
+    String clockEnabled, clockFormat;
     String aircraftMarker, autoUpdate;
 
     // Wi-Fi section and the mode it is being shown in.
@@ -953,6 +954,17 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                                     <input id="wind" name="wind" type="checkbox" %WIND%>
                                 </label>
                             </div>
+
+                            <div class="display-option">
+                                <label class="display-toggle" for="clock">
+                                    <span>Show local time</span>
+                                    <input id="clock" name="clock" type="checkbox" %CLOCK%>
+                                </label>
+                                <select id="clock-format" name="clock-format" aria-label="Clock format">
+                                    <option value="24h" %CLOCK_24H_SELECTED%>24-hour</option>
+                                    <option value="12h" %CLOCK_12H_SELECTED%>AM/PM</option>
+                                </select>
+                            </div>
                         </section>
 
                         <section class="display-group" aria-labelledby="aircraft-labels-title">
@@ -1077,6 +1089,7 @@ static const char CONFIG_HTML[] PROGMEM = R"(
             bindDependentSelect('scanline', 'sweep-period');
             bindDependentSelect('speed', 'speed-unit');
             bindDependentSelect('altitude', 'altitude-unit');
+            bindDependentSelect('clock', 'clock-format');
 
             function fillLocation(latitude, longitude, message, suggestedName) {
                 document.getElementById('latitude').value = Number(latitude).toFixed(6);
@@ -1604,6 +1617,12 @@ void ConfigurationWebServer::EnsureDefaults() {
     ensureKey("destination", "true");
     ensureKey("wind", "true");
 
+    // Off by default: the clock is the largest thing on the face after the
+    // radar itself, and a radar that shows one without being asked reads as a
+    // clock with aircraft on it.
+    ensureKey("clock", "false");
+    ensureKey("clock-format", "24h");
+
     // Automatic by default: an unattended radar that quietly keeps itself
     // current is the behaviour most owners want, and the alternative leaves
     // security fixes waiting on someone opening this page.
@@ -1660,6 +1679,8 @@ void ConfigurationWebServer::Initialise(FirmwareUpdater& updater, Mode serveMode
         values.altitudeUnit = prefs.getString("altitude-unit", "feet");
         values.destinationEnabled = prefs.getString("destination", "false");
         values.windEnabled = prefs.getString("wind", "false");
+        values.clockEnabled = prefs.getString("clock", "false");
+        values.clockFormat = prefs.getString("clock-format", "24h");
         values.aircraftMarker = prefs.getString("aircraft-marker", "radar");
         values.autoUpdate = prefs.getString("auto-update", "true");
         const String storedSsid = prefs.getString("wifi-ssid", "");
@@ -1741,6 +1762,9 @@ void ConfigurationWebServer::Initialise(FirmwareUpdater& updater, Mode serveMode
                 if (var == "ALTITUDE_METERS_SELECTED") return values.altitudeUnit == "meters" ? "selected" : "";
                 if (var == "DESTINATION")    return values.destinationEnabled == "true" ? "checked" : "";
                 if (var == "WIND")           return values.windEnabled == "true" ? "checked" : "";
+                if (var == "CLOCK")          return values.clockEnabled == "true" ? "checked" : "";
+                if (var == "CLOCK_24H_SELECTED") return values.clockFormat != "12h" ? "selected" : "";
+                if (var == "CLOCK_12H_SELECTED") return values.clockFormat == "12h" ? "selected" : "";
                 if (var == "MARKER_RADAR_SELECTED") return values.aircraftMarker == "radar" ? "selected" : "";
                 if (var == "MARKER_TRIANGLE_SELECTED") return values.aircraftMarker == "triangle" ? "selected" : "";
                 if (var == "MARKER_DOT_SELECTED") return values.aircraftMarker == "dot" ? "selected" : "";
@@ -1981,6 +2005,7 @@ void ConfigurationWebServer::Initialise(FirmwareUpdater& updater, Mode serveMode
         saveIfOneOf("speed-unit", { "knots", "meters-second" });
         saveIfOneOf("altitude-unit", { "feet", "meters", "kft" });
         saveIfOneOf("sweep-period", { "2", "5", "10", "18", "30" });
+        saveIfOneOf("clock-format", { "24h", "12h" });
         saveIfOneOf("aircraft-marker", { "radar", "triangle", "dot" });
         saveIfOneOf("auto-update", { "true", "false" });
 
@@ -2032,6 +2057,7 @@ void ConfigurationWebServer::Initialise(FirmwareUpdater& updater, Mode serveMode
         prefs.putString("altitude", request->hasParam("altitude", true) ? "true" : "false");
         prefs.putString("destination", request->hasParam("destination", true) ? "true" : "false");
         prefs.putString("wind", request->hasParam("wind", true) ? "true" : "false");
+        prefs.putString("clock", request->hasParam("clock", true) ? "true" : "false");
         prefs.end();
 
         request->send(200, "text/html",

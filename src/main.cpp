@@ -383,6 +383,13 @@ void setup()
   if (!connected)
     RunSetupPortal();
 
+  // Start the clock on the radar face. Kept in UTC deliberately -- both offset
+  // arguments are zero -- because this chip has no timezone database to turn a
+  // place into an offset; AircraftManager fetches the offset for the configured
+  // coordinates and applies it when it draws. Asynchronous: the first sync
+  // lands a few seconds from here, and the clock stays off screen until it has.
+  configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+
   // begin background server for configuration
   configServer.Initialise(firmwareUpdater, ConfigurationWebServer::Mode::Station);
 

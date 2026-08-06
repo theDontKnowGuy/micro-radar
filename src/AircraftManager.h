@@ -19,8 +19,14 @@ private:
         None,
         FetchAircraft,
         FetchWind,
+        FetchTimezone,
         ResolveDestination,
         SolveLabels
+    };
+
+    enum class ClockFormat : uint8_t {
+        TwentyFourHour,
+        TwelveHour
     };
 
     enum class AircraftMarkerStyle : uint8_t {
@@ -66,6 +72,8 @@ private:
     bool displayAltitudeInFeet = true;
     bool displayDestination = false;
     bool displayWind = false;
+    bool displayClock = false;
+    ClockFormat clockFormat = ClockFormat::TwentyFourHour;
     String locationNameLabel;
     AircraftMarkerStyle aircraftMarkerStyle = AircraftMarkerStyle::RadarVector;
 
@@ -76,6 +84,19 @@ private:
     unsigned long lastWindUpdate = 0;
     bool hasScheduledWindFetch = false;
     String windLabel;
+
+    // The clock keeps system time in UTC and adds this at draw time. newlib on
+    // this chip has no timezone database, so an IANA name is of no use to it;
+    // the offset for the configured coordinates -- summer time already applied
+    // -- is fetched from the same weather API the wind comes from.
+    // Written by the render loop when a fetch lands, read by the label-layout
+    // worker -- which reserves the clock's region only once there is a time to
+    // put in it -- as well as by the draw pass. Atomic for the same reason
+    // updateNoticeVisible is. The offset beside it is render-loop only.
+    long utcOffsetSeconds = 0;
+    std::atomic<bool> hasUtcOffset{false};
+    unsigned long lastTimezoneFetch = 0;
+    bool hasScheduledTimezoneFetch = false;
     unsigned long lastDestinationLookup = 0;
     unsigned long lastLabelLayout = 0;
     bool labelLayoutDirty = true;
@@ -99,6 +120,8 @@ private:
     bool routeLookupReady = false;
     String completedWindLabel;
     bool windFetchReady = false;
+    long completedUtcOffsetSeconds = 0;
+    bool timezoneFetchReady = false;
     std::vector<RenderAircraft> labelLayoutJobAircraft;
     std::vector<TrackedAircraft> labelLayoutJobTracked;
     std::vector<LabelLayoutResult> completedLabelLayout;
@@ -121,6 +144,7 @@ private:
     void DrawAircraftInfo(LGFX_Sprite& backbuffer, const RenderAircraft& aircraft) const;
     void DrawLabelLeader(LGFX_Sprite& backbuffer, const RenderAircraft& aircraft) const;
     void DrawWindInfo(LGFX_Sprite& backbuffer) const;
+    void DrawClock(LGFX_Sprite& backbuffer) const;
     void DrawLocationInfo(LGFX_Sprite& backbuffer) const;
     void DrawUpdateNotice(LGFX_Sprite& backbuffer) const;
     void DrawAircraftRadarVector(LGFX_Sprite& backbuffer, int x, int y, const TrackedAircraft& tracked) const;
@@ -153,6 +177,7 @@ private:
     void ConsumeNetworkResults();
     void RunAircraftFetch();
     void RunWindFetch();
+    void RunTimezoneFetch();
     void RunDestinationLookup(const String& icao, const String& callsign);
     void NetworkTaskLoop();
     static void NetworkTaskEntry(void* context);
