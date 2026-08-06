@@ -1,5 +1,8 @@
 #include "ConfigurationWebServer.h"
 
+#include <algorithm>
+#include <cmath>
+#include <cstdlib>
 #include <vector>
 
 #include <ESPmDNS.h>
@@ -78,7 +81,7 @@ static String FormatUptime(unsigned long milliseconds)
 // be the thing that opens Preferences or asks the Wi-Fi driver anything.
 struct PageValues {
     String latitude, longitude, locationName, radius;
-    String openskyClientId, openskySecret, geocoderUrl;
+    String openskyClientId, openskySecretPlaceholder, geocoderUrl;
     String scanlineEnabled, sweepPeriod, speedEnabled, speedUnit;
     String altitudeEnabled, altitudeUnit, destinationEnabled, windEnabled;
     String aircraftMarker, autoUpdate;
@@ -88,6 +91,59 @@ struct PageValues {
     String networkNote, networkOpen, networkSummary, forgetHidden, saveLabel;
     String netIp, netRssi, netMac, netUptime, netHeap;
 };
+
+// The radar has no login, so anything on the LAN can already reconfigure it on
+// purpose. What this stops is a page on the wider internet doing it without the
+// owner's knowledge: a form or fetch aimed at http://microradar.local/save from
+// an unrelated tab. A browser labels those with an Origin that is not ours.
+// Requests carrying no Origin at all (curl, scripts) are left alone -- they are
+// not the attack this is here for.
+static bool IsCrossSiteRequest(AsyncWebServerRequest* request)
+{
+    if (!request->hasHeader("Origin"))
+        return false;
+
+    const String origin = request->header("Origin");
+    const String& host = request->host();
+    return origin != "http://" + host && origin != "https://" + host;
+}
+
+// Rejects a POST that a browser says came from somewhere else. Returns true
+// when the caller should stop.
+static bool RejectedAsCrossSite(AsyncWebServerRequest* request)
+{
+    if (!IsCrossSiteRequest(request))
+        return false;
+
+    Serial.print("[WARN] Rejected cross-site request from ");
+    Serial.println(request->header("Origin"));
+    request->send(403, "text/plain", "Cross-site request rejected");
+    return true;
+}
+
+// The page constrains these with min/max/step, but the page is not the only
+// thing that can POST to /save. A radius of zero is the one that matters: it is
+// the divisor in the coordinate projection, so storing it turns every aircraft
+// position into infinity on the next boot.
+static bool IsNumberInRange(const String& value, double low, double high)
+{
+    if (value.isEmpty())
+        return false;
+
+    char* end = nullptr;
+    const double parsed = strtod(value.c_str(), &end);
+    if (end == value.c_str() || *end != '\0' || std::isnan(parsed))
+        return false;
+
+    return parsed >= low && parsed <= high;
+}
+
+// Stored, then handed to the page's `new URL(...)` and fetched by the browser.
+// Anything that is not plain http(s) has no business being saved here.
+static bool IsHttpUrl(const String& value)
+{
+    return value.startsWith("http://") || value.startsWith("https://");
+}
 
 static String CleanLocationName(const String& value)
 {
@@ -844,7 +900,7 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                         type="password"
                         autocomplete="off"
                         spellcheck="false"
-                        value='%OPENSKY_SECRET%'>
+                        placeholder="%OPENSKY_SECRET_PLACEHOLDER%">
                     </label>
                     </div>
                 </fieldset>
@@ -1592,7 +1648,7 @@ void ConfigurationWebServer::Initialise(FirmwareUpdater& updater, Mode serveMode
         values.locationName = EscapeHtmlAttribute(prefs.getString("location-name", ""));
         values.radius = EscapeHtmlAttribute(prefs.getString("radius", "1.0"));
         values.openskyClientId = EscapeHtmlAttribute(prefs.getString("opensky-id", ""));
-        String openskySecret = prefs.getString("opensky-secret", "");
+        const bool hasOpenskySecret = !prefs.getString("opensky-secret", "").isEmpty();
         values.geocoderUrl = EscapeHtmlAttribute(
             prefs.getString("geocoder-url", "https://nominatim.openstreetmap.org/search")
         );
@@ -1609,11 +1665,12 @@ void ConfigurationWebServer::Initialise(FirmwareUpdater& updater, Mode serveMode
         const String storedSsid = prefs.getString("wifi-ssid", "");
         prefs.end();
 
-        // mask secret before sending to client
-        for (size_t i = 0; i < openskySecret.length(); ++i) {
-            openskySecret[i] = '*';
-        }
-        values.openskySecret = openskySecret;
+        // Sent as a placeholder, never as a value. A masked value would still
+        // have to be told apart from a real one on save, and the previous
+        // "contains an asterisk" test failed exactly that job.
+        values.openskySecretPlaceholder = hasOpenskySecret
+            ? "Leave blank to keep the stored secret"
+            : "Client secret";
 
         // The Wi-Fi password is never sent back, masked or otherwise: an empty
         // field means "leave the stored one alone", which also spares the page
@@ -1668,7 +1725,7 @@ void ConfigurationWebServer::Initialise(FirmwareUpdater& updater, Mode serveMode
                 if (var == "LOCATION_NAME")  return values.locationName;
                 if (var == "RADIUS")         return values.radius;
                 if (var == "OPENSKY_ID")     return values.openskyClientId;
-                if (var == "OPENSKY_SECRET") return values.openskySecret;
+                if (var == "OPENSKY_SECRET_PLACEHOLDER") return values.openskySecretPlaceholder;
                 if (var == "GEOCODER_URL")   return values.geocoderUrl;
                 if (var == "SCANLINE")       return values.scanlineEnabled == "true" ? "checked" : "";
                 if (var == "SWEEP_2_SELECTED") return values.sweepPeriod == "2" ? "selected" : "";
@@ -1730,39 +1787,59 @@ void ConfigurationWebServer::Initialise(FirmwareUpdater& updater, Mode serveMode
 
         // Strongest first, and only once per name: a mesh network answers from
         // every node it has, and a list of six identical names is no use to
-        // anyone choosing one.
-        std::vector<int16_t> order;
-        order.reserve(found);
+        // anyone choosing one. Read each entry out of the driver once -- the
+        // previous pass called WiFi.SSID() inside its comparison loop, which
+        // allocated and freed a String for every pair.
+        struct ScannedNetwork {
+            String ssid;
+            int32_t rssi;
+            bool secure;
+        };
+
+        std::vector<ScannedNetwork> networks;
+        networks.reserve(found);
         for (int16_t i = 0; i < found; ++i) {
-            const String ssid = WiFi.SSID(i);
+            String ssid = WiFi.SSID(i);
             if (ssid.isEmpty())
                 continue;
 
-            bool duplicate = false;
-            for (const int16_t seen : order)
-                duplicate = duplicate || WiFi.SSID(seen) == ssid;
-            if (duplicate)
-                continue;
-
             const int32_t rssi = WiFi.RSSI(i);
-            auto position = order.begin();
-            while (position != order.end() && WiFi.RSSI(*position) >= rssi)
-                ++position;
-            order.insert(position, i);
+            auto existing = std::find_if(
+                networks.begin(),
+                networks.end(),
+                [&](const ScannedNetwork& seen) { return seen.ssid == ssid; }
+            );
+
+            // Keep the strongest node of a mesh rather than the first seen.
+            if (existing != networks.end()) {
+                if (rssi > existing->rssi)
+                    existing->rssi = rssi;
+                continue;
+            }
+
+            networks.push_back({
+                std::move(ssid),
+                rssi,
+                WiFi.encryptionType(i) != WIFI_AUTH_OPEN
+            });
         }
+        WiFi.scanDelete();
+
+        std::sort(
+            networks.begin(),
+            networks.end(),
+            [](const ScannedNetwork& a, const ScannedNetwork& b) { return a.rssi > b.rssi; }
+        );
 
         String body = "{\"scanning\":false,\"networks\":[";
-        for (size_t i = 0; i < order.size(); ++i) {
-            if (i > 0)
+        for (const auto& network : networks) {
+            if (body.endsWith("}"))
                 body += ',';
-            body += "{\"ssid\":\"" + EscapeJsonString(WiFi.SSID(order[i])) +
-                    "\",\"rssi\":" + String(WiFi.RSSI(order[i])) +
-                    ",\"secure\":" +
-                    (WiFi.encryptionType(order[i]) == WIFI_AUTH_OPEN ? "false" : "true") + '}';
+            body += "{\"ssid\":\"" + EscapeJsonString(network.ssid) +
+                    "\",\"rssi\":" + String(network.rssi) +
+                    ",\"secure\":" + (network.secure ? "true" : "false") + '}';
         }
         body += "]}";
-
-        WiFi.scanDelete();
 
         AsyncWebServerResponse* response = request->beginResponse(200, "application/json", body);
         response->addHeader("Cache-Control", "no-store");
@@ -1774,6 +1851,9 @@ void ConfigurationWebServer::Initialise(FirmwareUpdater& updater, Mode serveMode
     // left alone -- they are only ever read by the one-shot import in main.cpp,
     // which the flag written here permanently disables.
     server.on("/wifi/forget", HTTP_POST, [this](AsyncWebServerRequest* request) {
+        if (RejectedAsCrossSite(request))
+            return;
+
         Serial.println("[POST] Forgetting stored Wi-Fi network");
         prefs.begin("config", false);
         prefs.putString("wifi-ssid", "");
@@ -1786,6 +1866,9 @@ void ConfigurationWebServer::Initialise(FirmwareUpdater& updater, Mode serveMode
     });
 
     server.on("/restart", HTTP_POST, [this](AsyncWebServerRequest* request) {
+        if (RejectedAsCrossSite(request))
+            return;
+
         Serial.println("[POST] Restart requested from the configuration page");
         request->send(200, "text/plain", "Restarting");
         restartRequested.store(true);
@@ -1813,6 +1896,9 @@ void ConfigurationWebServer::Initialise(FirmwareUpdater& updater, Mode serveMode
     // TLS handshake, which does not belong on the web server's task -- so the
     // page polls /update/status afterwards to find out how it went.
     server.on("/update/check", HTTP_POST, [this](AsyncWebServerRequest* request) {
+        if (RejectedAsCrossSite(request))
+            return;
+
         Serial.println("[POST] Manual update check requested");
         if (firmwareUpdater != nullptr)
             firmwareUpdater->RequestCheckNow();
@@ -1823,6 +1909,9 @@ void ConfigurationWebServer::Initialise(FirmwareUpdater& updater, Mode serveMode
     // first" mode -- with automatic updates the render loop has already taken
     // it -- so this is the owner answering that question.
     server.on("/update/install", HTTP_POST, [this](AsyncWebServerRequest* request) {
+        if (RejectedAsCrossSite(request))
+            return;
+
         Serial.println("[POST] Manual firmware install requested");
         const bool accepted = firmwareUpdater != nullptr && firmwareUpdater->RequestInstallNow();
         request->send(accepted ? 202 : 409, "application/json",
@@ -1846,74 +1935,80 @@ void ConfigurationWebServer::Initialise(FirmwareUpdater& updater, Mode serveMode
 
     // Handle save submission to web server
     server.on("/save", HTTP_POST, [&](AsyncWebServerRequest* request) {
+        if (RejectedAsCrossSite(request))
+            return;
+
         Serial.println("[POST] Handling form submission to config web server...");
 
-        // safe parameter retrieval helper lambda
-        auto TrySaveParam = [request, this](const char* paramName) {
+        // Returns the submitted value, or an empty String when the field was
+        // not part of this submission. An absent field always means "leave the
+        // stored value alone" -- every validated save below reads that way.
+        auto submitted = [request](const char* paramName) {
             const auto* param = request->getParam(paramName, true);
-            if (param == nullptr)
-                return false;
+            return param != nullptr ? param->value() : String("");
+        };
 
-            prefs.putString(paramName, param->value());
-            return true;
-            };
+        // Stores only when the field was submitted and `accept` likes it. A
+        // rejected value leaves the previous setting in place rather than
+        // writing something the radar cannot use.
+        auto saveIf = [&](const char* paramName, auto accept) {
+            const String value = submitted(paramName);
+            if (!value.isEmpty() && accept(value))
+                prefs.putString(paramName, value);
+        };
+
+        // Same contract as saveIf, for the settings whose valid values are a
+        // fixed list. Taking the list directly rather than returning a
+        // predicate that captures it keeps its lifetime obviously in scope.
+        auto saveIfOneOf = [&](const char* paramName, std::initializer_list<const char*> allowed) {
+            const String value = submitted(paramName);
+            for (const char* option : allowed) {
+                if (value == option) {
+                    prefs.putString(paramName, value);
+                    return;
+                }
+            }
+        };
 
         prefs.begin("config", false);
 
-        TrySaveParam("latitude");
-        TrySaveParam("longitude");
-        TrySaveParam("radius");
-        TrySaveParam("opensky-id");
-        TrySaveParam("geocoder-url");
-        TrySaveParam("speed-unit");
-        TrySaveParam("altitude-unit");
+        // Radius must stay clear of zero: it is the divisor in the coordinate
+        // projection. The upper bounds are OpenSky's own bounding-box limits.
+        saveIf("latitude", [](const String& v) { return IsNumberInRange(v, -90.0, 90.0); });
+        saveIf("longitude", [](const String& v) { return IsNumberInRange(v, -180.0, 180.0); });
+        saveIf("radius", [](const String& v) { return IsNumberInRange(v, 0.000001, 2.499999); });
+        saveIf("geocoder-url", IsHttpUrl);
+        saveIfOneOf("speed-unit", { "knots", "meters-second" });
+        saveIfOneOf("altitude-unit", { "feet", "meters", "kft" });
+        saveIfOneOf("sweep-period", { "2", "5", "10", "18", "30" });
+        saveIfOneOf("aircraft-marker", { "radar", "triangle", "dot" });
+        saveIfOneOf("auto-update", { "true", "false" });
+
+        // Free text rather than a fixed set, so these two are stored whenever
+        // submitted -- including empty, which is how the OpenSky client id is
+        // cleared to go back to the anonymous allowance.
+        const auto* openskyIdParam = request->getParam("opensky-id", true);
+        if (openskyIdParam != nullptr)
+            prefs.putString("opensky-id", openskyIdParam->value());
 
         const auto* locationNameParam = request->getParam("location-name", true);
         if (locationNameParam != nullptr)
             prefs.putString("location-name", CleanLocationName(locationNameParam->value()));
 
-        const auto* sweepPeriodParam = request->getParam("sweep-period", true);
-        if (sweepPeriodParam != nullptr) {
-            const String sweepPeriod = sweepPeriodParam->value();
-            if (sweepPeriod == "2" || sweepPeriod == "5" || sweepPeriod == "10" ||
-                sweepPeriod == "18" || sweepPeriod == "30")
-                prefs.putString("sweep-period", sweepPeriod);
-        }
-
-        const auto* markerParam = request->getParam("aircraft-marker", true);
-        if (markerParam != nullptr) {
-            const String marker = markerParam->value();
-            if (marker == "radar" || marker == "triangle" || marker == "dot")
-                prefs.putString("aircraft-marker", marker);
-        }
-
-        const auto* autoUpdateParam = request->getParam("auto-update", true);
-        if (autoUpdateParam != nullptr) {
-            const String autoUpdate = autoUpdateParam->value();
-            if (autoUpdate == "true" || autoUpdate == "false")
-                prefs.putString("auto-update", autoUpdate);
-        }
-
-        const auto* param = request->getParam("opensky-secret", true);
-        if (param != nullptr) {
-            const String& secret = param->value();
-            if (secret.indexOf('*') == -1) { // Special handling for secret: don't overwrite with masked value
-                prefs.putString("opensky-secret", secret);
-            }
-        }
+        // The stored secret is never sent to the page, so an empty field means
+        // "keep it" -- the same contract the Wi-Fi password uses. The page used
+        // to receive a row of asterisks and skip any value containing one,
+        // which quietly made a secret with a '*' in it impossible to save.
+        const String openskySecret = submitted("opensky-secret");
+        if (!openskySecret.isEmpty())
+            prefs.putString("opensky-secret", openskySecret);
 
         // A name typed into the "other network" box wins over the scan list, so
         // a hidden network can be joined without it ever appearing there.
-        String ssid;
-        const auto* manualSsidParam = request->getParam("wifi-ssid-manual", true);
-        if (manualSsidParam != nullptr)
-            ssid = manualSsidParam->value();
+        String ssid = submitted("wifi-ssid-manual");
         ssid.trim();
-        if (ssid.isEmpty()) {
-            const auto* ssidParam = request->getParam("wifi-ssid", true);
-            if (ssidParam != nullptr)
-                ssid = ssidParam->value();
-        }
+        if (ssid.isEmpty())
+            ssid = submitted("wifi-ssid");
 
         if (!ssid.isEmpty()) {
             const String previousSsid = prefs.getString("wifi-ssid", "");
@@ -1923,8 +2018,7 @@ void ConfigurationWebServer::Initialise(FirmwareUpdater& updater, Mode serveMode
             // "leave it alone" -- unless the network itself is changing, where
             // keeping the old network's password would be nonsense and empty is
             // how an open network is entered.
-            const auto* passwordParam = request->getParam("wifi-pass", true);
-            const String password = passwordParam != nullptr ? passwordParam->value() : String("");
+            const String password = submitted("wifi-pass");
             if (!password.isEmpty() || ssid != previousSsid)
                 prefs.putString("wifi-pass", password);
 

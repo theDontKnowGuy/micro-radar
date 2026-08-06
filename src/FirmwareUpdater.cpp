@@ -187,10 +187,10 @@ void FirmwareUpdater::CheckForUpdate()
         return;
     }
 
-    // One manifest covers every panel variant. Flashing a 360x360 GC9B72 image
-    // onto a 240x240 GC9A01 board would produce a device that boots to a broken
-    // display and can only be recovered over USB, so a missing entry for this
-    // build is a hard stop rather than something to guess around.
+    // A manifest can carry several hardware builds. Flashing an image meant for
+    // different hardware would produce a device that boots to a broken display
+    // and can only be recovered over USB, so a missing entry for this build is a
+    // hard stop rather than something to guess around.
     JsonVariant build = doc["builds"][FIRMWARE_BUILD];
     if (!build.is<JsonObject>()) {
         SetStatus(Status::Failed, "release " + offeredVersion + " has no build for " + FIRMWARE_BUILD);

@@ -26,7 +26,7 @@ REPO="${MICRO_RADAR_REPO:-thedontknowguy/micro-radar}"
 # Every environment whose binary goes into the release. The names double as the
 # manifest's build keys and must match the -DFIRMWARE_BUILD flags in
 # platformio.ini, or devices will not find an image meant for them.
-RELEASE_ENVS="${MICRO_RADAR_RELEASE_ENVS:-esp32-s3-gc9b72 esp32-s3-devkitm-1}"
+RELEASE_ENVS="${MICRO_RADAR_RELEASE_ENVS:-esp32-s3-gc9b72}"
 
 # PlatformIO's own interpreter -- the project .venv has an esptool that breaks
 # the build.

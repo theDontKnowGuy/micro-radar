@@ -26,9 +26,8 @@
 #define FIRMWARE_NOTES "New built-in Wi-Fi setup portal, OpenSky sign-up help, and a choice of automatic or confirmed firmware updates."
 
 // Identifies which hardware build this binary is for. Set per environment in
-// platformio.ini and used as the key into the manifest's "builds" object, so
-// one manifest can serve every panel variant and a GC9B72 image is never
-// offered to a GC9A01 board.
+// platformio.ini and used as the key into the manifest's "builds" object, so a
+// radar only ever installs an image published for its own hardware.
 #ifndef FIRMWARE_BUILD
 #define FIRMWARE_BUILD "unknown"
 #endif

@@ -33,8 +33,8 @@ namespace lgfx
     // ESPHome's mipi_spi driver -- which is confirmed working on this exact panel --
     // instead frames every command individually: CS low, command byte, CS high, then
     // (if the command has arguments) CS low, data bytes, CS high. The controller
-    // latches on those CS edges. The GC9A01 tolerated CS being held low, which is why
-    // the original 1.28" panel worked without this.
+    // latches on those CS edges, unlike the GC9A01 this driver inherits from, which
+    // tolerates CS being held low.
     //
     // See esphome/components/mipi_spi/mipi_spi.h, write_command_() BUS_TYPE_SINGLE.
     bool init(bool use_reset) override

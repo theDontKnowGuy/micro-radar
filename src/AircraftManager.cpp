@@ -24,6 +24,34 @@ constexpr int UPDATE_LABEL_Y = LOCATION_LABEL_Y - UPDATE_LABEL_HEIGHT - 3;
 
 #include <ArduinoJson.h>
 #include <algorithm>
+#include <set>
+
+namespace {
+
+bool IsSuccessful(const HttpResult& result)
+{
+    return result.success && result.statusCode >= 200 && result.statusCode < 300;
+}
+
+// Every fetch on the worker task reported its failures with the same dozen
+// lines of Serial.print. One copy, named by what was being fetched.
+void LogRequestFailure(const char* what, const HttpResult& result)
+{
+    Serial.printf("[WARN] %s request failed", what);
+    if (result.statusCode != 0)
+        Serial.printf(" (HTTP %d)", result.statusCode);
+    if (!result.errorMessage.isEmpty())
+        Serial.printf(": %s", result.errorMessage.c_str());
+    Serial.println();
+}
+
+void LogParseFailure(const char* what, const DeserializationError& error, const char* missing)
+{
+    Serial.printf("[WARN] %s response parse failed: %s\n",
+                  what, error ? error.c_str() : missing);
+}
+
+}  // namespace
 
 void AircraftManager::Initialise()
 {
@@ -31,6 +59,15 @@ void AircraftManager::Initialise()
     lat = configServer.GetStoredString("latitude").toDouble();
     lon = configServer.GetStoredString("longitude").toDouble();
     rad = configServer.GetStoredString("radius").toDouble();
+
+    // ProjectCoordinateToScreen divides by the radius, so a stored zero puts
+    // every aircraft at an infinite screen coordinate. /save rejects one now,
+    // but a radar configured by firmware that did not could already hold one.
+    if (!(rad > 0.0) || rad > 2.5) {
+        Serial.println("[WARN] Stored radar radius is unusable; falling back to 1.0 degrees");
+        rad = 1.0;
+    }
+
     openskyClientId = configServer.GetStoredString("opensky-id");
     openskyClientSecret = configServer.GetStoredString("opensky-secret");
 
@@ -166,46 +203,55 @@ void AircraftManager::NetworkTaskLoop()
             xSemaphoreGive(networkStateMutex);
         }
 
-        if (job == NetworkJobType::FetchAircraft)
-            RunAircraftFetch();
-        else if (job == NetworkJobType::FetchWind)
-            RunWindFetch();
-        else if (job == NetworkJobType::ResolveDestination)
-            RunDestinationLookup(icao, callsign);
-        else if (job == NetworkJobType::SolveLabels) {
-            // Vector moves can change the address of the copied tracking
-            // records, so reconnect the render records before solving.
-            for (size_t i = 0; i < layoutAircraft.size(); ++i)
-                layoutAircraft[i].tracked = &layoutTracked[i];
+        switch (job) {
+            case NetworkJobType::FetchAircraft:
+                RunAircraftFetch();
+                break;
 
-            SolveAircraftLabels(layoutAircraft);
+            case NetworkJobType::FetchWind:
+                RunWindFetch();
+                break;
 
-            std::vector<LabelLayoutResult> results;
-            results.reserve(layoutAircraft.size());
-            for (const auto& current : layoutAircraft) {
-                results.push_back({
-                    current.tracked->state.icao24,
-                    current.tracked->labelOffsetX,
-                    current.tracked->labelOffsetY,
-                    current.tracked->lastLabelMove
+            case NetworkJobType::ResolveDestination:
+                RunDestinationLookup(icao, callsign);
+                break;
+
+            case NetworkJobType::SolveLabels: {
+                // Vector moves can change the address of the copied tracking
+                // records, so reconnect the render records before solving.
+                for (size_t i = 0; i < layoutAircraft.size(); ++i)
+                    layoutAircraft[i].tracked = &layoutTracked[i];
+
+                SolveAircraftLabels(layoutAircraft);
+
+                std::vector<LabelLayoutResult> results;
+                results.reserve(layoutAircraft.size());
+                for (const auto& current : layoutAircraft) {
+                    results.push_back({
+                        current.tracked->state.icao24,
+                        current.tracked->labelOffsetX,
+                        current.tracked->labelOffsetY,
+                        current.tracked->lastLabelMove
+                    });
+                }
+
+                PublishNetworkResult([&] {
+                    completedLabelLayout.swap(results);
+                    labelLayoutReady = true;
                 });
+                break;
             }
 
-            if (xSemaphoreTake(networkStateMutex, portMAX_DELAY) == pdTRUE) {
-                completedLabelLayout.swap(results);
-                labelLayoutReady = true;
-                networkBusy = false;
-                xSemaphoreGive(networkStateMutex);
-            }
-        }
-        else if (xSemaphoreTake(networkStateMutex, portMAX_DELAY) == pdTRUE) {
-            networkBusy = false;
-            xSemaphoreGive(networkStateMutex);
+            case NetworkJobType::None:
+                // Woken with nothing to do. Still has to hand the worker back,
+                // or the claim taken by the scheduler stays latched forever.
+                PublishNetworkResult([] {});
+                break;
         }
     }
 }
 
-bool AircraftManager::ScheduleNetworkJob(NetworkJobType job, const String& icao, const String& callsign)
+bool AircraftManager::TryClaimNetworkWorker()
 {
     if (networkTaskHandle == nullptr || networkStateMutex == nullptr)
         return false;
@@ -219,26 +265,31 @@ bool AircraftManager::ScheduleNetworkJob(NetworkJobType job, const String& icao,
     }
 
     networkBusy = true;
+    return true;
+}
+
+void AircraftManager::CommitNetworkJob(NetworkJobType job, const String& icao, const String& callsign)
+{
     networkJob = job;
     networkJobIcao = icao;
     networkJobCallsign = callsign;
     xSemaphoreGive(networkStateMutex);
     xTaskNotifyGive(networkTaskHandle);
+}
+
+bool AircraftManager::ScheduleNetworkJob(NetworkJobType job, const String& icao, const String& callsign)
+{
+    if (!TryClaimNetworkWorker())
+        return false;
+
+    CommitNetworkJob(job, icao, callsign);
     return true;
 }
 
 bool AircraftManager::ScheduleLabelLayout(const std::vector<RenderAircraft>& aircraft)
 {
-    if (aircraft.empty() || networkTaskHandle == nullptr || networkStateMutex == nullptr)
+    if (aircraft.empty() || !TryClaimNetworkWorker())
         return false;
-
-    if (xSemaphoreTake(networkStateMutex, 0) != pdTRUE)
-        return false;
-
-    if (networkBusy) {
-        xSemaphoreGive(networkStateMutex);
-        return false;
-    }
 
     labelLayoutJobAircraft = aircraft;
     labelLayoutJobTracked.clear();
@@ -248,12 +299,7 @@ bool AircraftManager::ScheduleLabelLayout(const std::vector<RenderAircraft>& air
     for (size_t i = 0; i < labelLayoutJobAircraft.size(); ++i)
         labelLayoutJobAircraft[i].tracked = &labelLayoutJobTracked[i];
 
-    networkBusy = true;
-    networkJob = NetworkJobType::SolveLabels;
-    networkJobIcao = "";
-    networkJobCallsign = "";
-    xSemaphoreGive(networkStateMutex);
-    xTaskNotifyGive(networkTaskHandle);
+    CommitNetworkJob(NetworkJobType::SolveLabels);
     return true;
 }
 
@@ -277,38 +323,25 @@ void AircraftManager::RunAircraftFetch()
 
     std::vector<Aircraft> fetchedAircraft;
     bool fetchSucceeded = false;
-    if (result.success && result.statusCode >= 200 && result.statusCode < 300) {
+    if (!IsSuccessful(result)) {
+        LogRequestFailure("OpenSky API", result);
+    } else {
         JsonDocument doc;
         const DeserializationError error = deserializeJson(doc, result.response);
         if (!error && doc["states"].is<JsonArray>()) {
             fetchedAircraft = JsonParser::ParseArray<Aircraft>(doc["states"]);
             fetchSucceeded = true;
         } else {
-            Serial.print("[WARN] OpenSky response parse failed: ");
-            Serial.println(error ? error.c_str() : "missing states array");
+            LogParseFailure("OpenSky", error, "missing states array");
         }
-    } else {
-        Serial.print("[WARN] OpenSky API request failed");
-        if (result.statusCode != 0) {
-            Serial.print(" (HTTP ");
-            Serial.print(result.statusCode);
-            Serial.print(")");
-        }
-        if (!result.errorMessage.isEmpty()) {
-            Serial.print(": ");
-            Serial.print(result.errorMessage);
-        }
-        Serial.println();
     }
 
-    if (xSemaphoreTake(networkStateMutex, portMAX_DELAY) == pdTRUE) {
+    PublishNetworkResult([&] {
         if (fetchSucceeded) {
             completedAircraftFetch.swap(fetchedAircraft);
             aircraftFetchReady = true;
         }
-        networkBusy = false;
-        xSemaphoreGive(networkStateMutex);
-    }
+    });
 }
 
 void AircraftManager::RunWindFetch()
@@ -324,7 +357,9 @@ void AircraftManager::RunWindFetch()
     );
 
     String fetchedWindLabel;
-    if (result.success && result.statusCode >= 200 && result.statusCode < 300) {
+    if (!IsSuccessful(result)) {
+        LogRequestFailure("Wind API", result);
+    } else {
         JsonDocument doc;
         const DeserializationError error = deserializeJson(doc, result.response);
         const JsonVariant currentWind = doc["current"];
@@ -382,31 +417,16 @@ void AircraftManager::RunWindFetch()
             }
             fetchedWindLabel = label;
         } else {
-            Serial.print("[WARN] Wind response parse failed: ");
-            Serial.println(error ? error.c_str() : "missing current wind fields");
+            LogParseFailure("Wind", error, "missing current wind fields");
         }
-    } else {
-        Serial.print("[WARN] Wind API request failed");
-        if (result.statusCode != 0) {
-            Serial.print(" (HTTP ");
-            Serial.print(result.statusCode);
-            Serial.print(")");
-        }
-        if (!result.errorMessage.isEmpty()) {
-            Serial.print(": ");
-            Serial.print(result.errorMessage);
-        }
-        Serial.println();
     }
 
-    if (xSemaphoreTake(networkStateMutex, portMAX_DELAY) == pdTRUE) {
+    PublishNetworkResult([&] {
         if (!fetchedWindLabel.isEmpty()) {
             completedWindLabel = fetchedWindLabel;
             windFetchReady = true;
         }
-        networkBusy = false;
-        xSemaphoreGive(networkStateMutex);
-    }
+    });
 }
 
 void AircraftManager::RunDestinationLookup(const String& icao, const String& callsign)
@@ -422,7 +442,7 @@ void AircraftManager::RunDestinationLookup(const String& icao, const String& cal
     String route;
     if (!safeCallsign.isEmpty()) {
         const HttpResult result = http.Get("https://api.adsbdb.com/v0/callsign/" + safeCallsign);
-        if (result.success && result.statusCode >= 200 && result.statusCode < 300) {
+        if (IsSuccessful(result)) {
             JsonDocument doc;
             if (!deserializeJson(doc, result.response)) {
                 const JsonVariant flightRoute = doc["response"]["flightroute"];
@@ -444,14 +464,12 @@ void AircraftManager::RunDestinationLookup(const String& icao, const String& cal
         }
     }
 
-    if (xSemaphoreTake(networkStateMutex, portMAX_DELAY) == pdTRUE) {
+    PublishNetworkResult([&] {
         completedRouteIcao = icao;
         completedRouteCallsign = callsign;
         completedRoute = route;
         routeLookupReady = true;
-        networkBusy = false;
-        xSemaphoreGive(networkStateMutex);
-    }
+    });
 }
 
 void AircraftManager::ConsumeNetworkResults()
@@ -497,7 +515,10 @@ void AircraftManager::ConsumeNetworkResults()
 
     if (hasAircraftFetch) {
         const unsigned long receivedAt = millis();
+        std::set<String> presentIcaos;
         for (auto& aircraft : fetchedAircraft) {
+            presentIcaos.insert(aircraft.icao24);
+
             auto tracked = trackedAircraft.find(aircraft.icao24);
             if (tracked == trackedAircraft.end()) {
                 auto inserted = trackedAircraft.emplace(
@@ -513,15 +534,12 @@ void AircraftManager::ConsumeNetworkResults()
             }
         }
 
-        for (auto& [icao, tracked] : trackedAircraft) {
-            const bool stillPresent = std::any_of(
-                fetchedAircraft.begin(),
-                fetchedAircraft.end(),
-                [&](const Aircraft& aircraft) { return aircraft.icao24 == icao; }
-            );
-            if (!stillPresent)
+        // Looked up rather than rescanned: the previous pass walked the whole
+        // fetch for every tracked aircraft, which is quadratic in the busiest
+        // airspace -- exactly where the render loop has least time to spare.
+        for (auto& [icao, tracked] : trackedAircraft)
+            if (presentIcaos.count(icao) == 0)
                 tracked.QueueRemoval();
-        }
     }
 
     if (hasRouteLookup && !route.isEmpty()) {

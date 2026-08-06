@@ -1,5 +1,26 @@
 #include "HttpRequestManager.h"
 
+String HttpRequestManager::UrlEncode(const String& value)
+{
+    String encoded;
+    encoded.reserve(value.length());
+
+    for (size_t i = 0; i < value.length(); ++i) {
+        const char c = value[i];
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+            c == '-' || c == '_' || c == '.' || c == '~') {
+            encoded += c;
+            continue;
+        }
+
+        char escape[4];
+        snprintf(escape, sizeof(escape), "%%%02X", static_cast<unsigned char>(c));
+        encoded += escape;
+    }
+
+    return encoded;
+}
+
 String HttpRequestManager::BuildQueryString(const std::vector<std::pair<String, String>>& params) const
 {
     if (params.empty())
@@ -7,15 +28,12 @@ String HttpRequestManager::BuildQueryString(const std::vector<std::pair<String, 
 
     String queryStream = "?";
 
-    bool first = true;
     for (const auto& [key, value] : params)
     {
-        if (!first)
+        if (queryStream.length() > 1)
             queryStream += "&";
 
-        queryStream += key + "=" + value;
-
-        first = false;
+        queryStream += UrlEncode(key) + "=" + UrlEncode(value);
     }
 
     return queryStream;

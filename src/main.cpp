@@ -56,18 +56,40 @@ void SecureWipe(void* data, size_t length)
     *bytes++ = 0;
 }
 
-// Centres up to four lines of status text on an otherwise blank panel. Every
-// screen the radar shows before it starts sweeping looks like this.
+// Centres up to five lines of status text on an otherwise blank panel. Every
+// screen the radar shows before it starts sweeping looks like this. The text is
+// scaled up to the largest whole multiple that still keeps the longest line
+// clear of the bezel -- these screens are read from across a room, and the
+// panel is round, so the usable width is a little short of SCREEN_SIZE.
 void ShowStatusScreen(const String& first,
                       const String& second = "",
                       const String& third = "",
-                      const String& fourth = "")
+                      const String& fourth = "",
+                      const String& fifth = "")
 {
-  const String lines[] = { first, second, third, fourth };
+  constexpr int MAX_TEXT_SIZE = 4;
+  constexpr int USABLE_WIDTH = SCREEN_SIZE - SCREEN_SIZE / 12;
+
+  const String lines[] = { first, second, third, fourth, fifth };
   int count = 0;
   for (const String& line : lines)
     count += line.isEmpty() ? 0 : 1;
 
+  int textSize = 1;
+  for (int candidate = MAX_TEXT_SIZE; candidate > 1; candidate--) {
+    tft.setTextSize(candidate);
+    bool fits = true;
+    for (const String& line : lines)
+      if (!line.isEmpty() && tft.textWidth(line) > USABLE_WIDTH)
+        fits = false;
+
+    if (fits) {
+      textSize = candidate;
+      break;
+    }
+  }
+
+  tft.setTextSize(textSize);
   tft.fillScreen(lgfx::color888(0, 0, 0));
   tft.setTextColor(lgfx::color888(0, 255, 0));
 
@@ -79,6 +101,9 @@ void ShowStatusScreen(const String& first,
     tft.drawCentreString(line, SCREEN_SIZE_DIV_2, y);
     y += lineHeight;
   }
+
+  // Everything else that draws straight to the panel expects the default scale.
+  tft.setTextSize(1);
 }
 
 // Firmware before the merged configuration page used WiFiManager, which left
@@ -124,10 +149,14 @@ void ImportStoredWiFiCredentials(String& ssid, String& password)
   WiFi.softAP(SetupHotspotName);
   configServer.Initialise(firmwareUpdater, ConfigurationWebServer::Mode::Setup);
 
+  // Kept to short lines on purpose: ShowStatusScreen sizes the type to the
+  // longest one, and this is the screen someone reads with the radar at arm's
+  // length while they hunt for the hotspot on their phone.
   ShowStatusScreen("- SETUP -",
-                   "Connect to this WiFi hotspot:",
+                   "Connect to WiFi:",
                    SetupHotspotName,
-                   "then open " + WiFi.softAPIP().toString());
+                   "then open",
+                   WiFi.softAPIP().toString());
 
   // Blocking on purpose. Nothing else can usefully run without a network, and
   // loop() is never reached in this mode -- the only way out is the reboot
@@ -148,8 +177,41 @@ void ImportStoredWiFiCredentials(String& ssid, String& password)
     delay(1000); // ESP.restart() does not return, but it is not declared that way
 }
 
+// The loading bar the radar shows whenever it is busy with something that takes
+// long enough to look like a hang: an outlined trough that fills left to right.
+// Both users draw it straight to the panel, so both have to own the display for
+// the duration -- see the note on RunFirmwareUpdate.
+constexpr int PROGRESS_BAR_HEIGHT = 16;
+constexpr int PROGRESS_BAR_WIDTH = SCREEN_SIZE / 2;
+constexpr int PROGRESS_BAR_X = (SCREEN_SIZE - PROGRESS_BAR_WIDTH) / 2;
+
+void DrawProgressBarOutline(int y, uint32_t color)
+{
+  tft.drawRect(PROGRESS_BAR_X, y, PROGRESS_BAR_WIDTH, PROGRESS_BAR_HEIGHT, color);
+}
+
+void DrawProgressBarFill(int y, int percent, uint32_t color)
+{
+  const int fill = ((PROGRESS_BAR_WIDTH - 4) * percent) / 100;
+  tft.fillRect(PROGRESS_BAR_X + 2, y + 2, fill, PROGRESS_BAR_HEIGHT - 4, color);
+}
+
 void ShowBootLogo()
 {
+  // Picked off the logo artwork so the bar reads as part of it rather than as
+  // something drawn on top: the bright blue of the wordmark, and a dim version
+  // of the same hue for the trough.
+  constexpr uint32_t BAR_COLOR = lgfx::color888(41, 163, 232);
+  constexpr uint32_t BAR_TROUGH_COLOR = lgfx::color888(16, 62, 112);
+
+  // How long the logo stays up. The bar is paced off this rather than off any
+  // real work -- there is nothing to measure at this point in boot, the wait is
+  // there to show the logo -- so it simply fills over the whole stretch.
+  constexpr unsigned long BOOT_HOLD_MS = 7000;
+
+  // Below the wordmark, inside the ring, where the artwork is black.
+  const int barY = SCREEN_SIZE_DIV_2 + 70;
+
   tft.fillScreen(lgfx::color888(0, 0, 0));
 
   lgfx::rgb565_t scanline[BootLogo::Width];
@@ -177,12 +239,25 @@ void ShowBootLogo()
   }
   tft.endWrite();
 
-  runIndex = 0;
-  runColor = 0;
-  runRemaining = 0;
-  SecureWipe(scanline, sizeof(scanline));
+  DrawProgressBarOutline(barY, BAR_TROUGH_COLOR);
 
-  delay(5000);
+  // Repainted only when the whole-percent figure moves, same as the update
+  // screen: 100 small fills over seven seconds, not one per pass of the loop.
+  const unsigned long startedAt = millis();
+  int lastPercent = -1;
+  unsigned long elapsed = 0;
+  while ((elapsed = millis() - startedAt) < BOOT_HOLD_MS) {
+    const int percent = static_cast<int>((elapsed * 100) / BOOT_HOLD_MS);
+    if (percent != lastPercent) {
+      lastPercent = percent;
+      DrawProgressBarFill(barY, percent, BAR_COLOR);
+    }
+    delay(10);
+  }
+
+  // The loop above always stops a percent or two short of the end.
+  DrawProgressBarFill(barY, 100, BAR_COLOR);
+
   tft.fillScreen(lgfx::color888(0, 0, 0));
   tft.waitDMA();
 }
@@ -209,11 +284,8 @@ void RunFirmwareUpdate()
   tft.drawCentreString("Updating firmware", SCREEN_SIZE_DIV_2, SCREEN_SIZE_DIV_2 - lineHeight * 2);
   tft.drawCentreString(release.version, SCREEN_SIZE_DIV_2, SCREEN_SIZE_DIV_2 - lineHeight);
 
-  constexpr int BAR_HEIGHT = 16;
-  const int barWidth = SCREEN_SIZE / 2;
-  const int barX = (SCREEN_SIZE - barWidth) / 2;
   const int barY = SCREEN_SIZE_DIV_2 + lineHeight;
-  tft.drawRect(barX, barY, barWidth, BAR_HEIGHT, lgfx::color888(0, 255, 0));
+  DrawProgressBarOutline(barY, lgfx::color888(0, 255, 0));
 
   // Redraw only when the whole-percent figure moves. The download is ~1.3MB in
   // small chunks, and repainting the bar on every one of them would put more
@@ -226,9 +298,8 @@ void RunFirmwareUpdate()
         return;
       lastPercent = percent;
 
-      const int fill = ((barWidth - 4) * percent) / 100;
-      tft.fillRect(barX + 2, barY + 2, fill, BAR_HEIGHT - 4, lgfx::color888(0, 255, 0));
-      tft.drawCentreString(String(percent) + "%   ", SCREEN_SIZE_DIV_2, barY + BAR_HEIGHT + 10);
+      DrawProgressBarFill(barY, percent, lgfx::color888(0, 255, 0));
+      tft.drawCentreString(String(percent) + "%   ", SCREEN_SIZE_DIV_2, barY + PROGRESS_BAR_HEIGHT + 10);
     });
 
   if (installed) {
@@ -258,13 +329,14 @@ void setup()
 
   // initialise LGFX + screen
   tft.init();
-  tft.invertDisplay(DISPLAY_INVERT); // differs per panel, see DisplayConfig.h
+  tft.invertDisplay(DISPLAY_INVERT); // see DisplayConfig.h
   ShowBootLogo();
 
   // At 360x360 the backbuffer is 129,600 bytes. Keeping that in SRAM leaves too
   // little contiguous heap for the TLS handshake OpenSky needs -- requests fail
-  // with "SSL - Memory allocation failed" -- so put it in PSRAM when the board
-  // has any. Falls back to SRAM, which is fine for the 240x240 panel.
+  // with "SSL - Memory allocation failed" -- so put it in PSRAM, which the
+  // required N16R8 module has. The check only guards the allocation below from
+  // asking for PSRAM on a board that has none.
   if (ESP.getPsramSize() > 0)
     backbuffer.setPsram(true);
 
@@ -322,7 +394,13 @@ void setup()
   // to tell, at a glance, which build a given unit ended up on. Kept to the bare
   // number here -- the release date and description are on the configuration
   // page, where there is room for them.
-  ShowStatusScreen("Configure me at", configurationUrl, "v" FIRMWARE_VERSION);
+  //
+  // Scheme and address are one line: a URL split across two reads as two things
+  // to type. ShowStatusScreen sizes the type to this longest line, so the whole
+  // screen drops a step -- still comfortably readable at arm's length.
+  ShowStatusScreen("Configure me at:",
+                   configurationUrl,
+                   "v" FIRMWARE_VERSION);
 
   // Keep the address visible long enough to read while the asynchronous
   // configuration server is already available.
@@ -431,30 +509,35 @@ void loop()
   // The sprite push is SCREEN_SIZE^2 * 2 bytes over SPI and dominates the frame,
   // so the SPI clock sets the frame rate directly. Reported as degrees-of-sweep
   // per frame because that is what actually reads as smooth or jumpy.
-  static uint32_t frameCount = 0;
-  static uint32_t drawUsTotal = 0;
-  static uint32_t pushUsTotal = 0;
-  static unsigned long lastTimingReportAt = 0;
+  //
+  // `if constexpr` so that with logging off the counters and their per-frame
+  // arithmetic are not merely unread but absent -- this is the hot path.
+  if constexpr (LOG_FRAME_TIMING) {
+    static uint32_t frameCount = 0;
+    static uint32_t drawUsTotal = 0;
+    static uint32_t pushUsTotal = 0;
+    static unsigned long lastTimingReportAt = 0;
 
-  drawUsTotal += pushStartedUs - drawStartedUs;
-  pushUsTotal += frameEndedUs - pushStartedUs;
-  frameCount++;
+    drawUsTotal += pushStartedUs - drawStartedUs;
+    pushUsTotal += frameEndedUs - pushStartedUs;
+    frameCount++;
 
-  if (LOG_FRAME_TIMING && now - lastTimingReportAt >= 2000) {
-    lastTimingReportAt = now;
-    const float drawMs = (drawUsTotal / 1000.0f) / frameCount;
-    const float pushMs = (pushUsTotal / 1000.0f) / frameCount;
-    const float totalMs = drawMs + pushMs;
-    Serial.printf(
-      "frame: draw %.1fms  push %.1fms  total %.1fms  %.1f fps  %.1f deg/frame"
-      "  heap %u (largest %u)\n",
-      drawMs, pushMs, totalMs,
-      totalMs > 0.0f ? 1000.0f / totalMs : 0.0f,
-      360.0f * (totalMs / static_cast<float>(radarSweepPeriodMs)),
-      ESP.getFreeHeap(), ESP.getMaxAllocHeap()
-    );
-    frameCount = 0;
-    drawUsTotal = 0;
-    pushUsTotal = 0;
+    if (now - lastTimingReportAt >= 2000) {
+      lastTimingReportAt = now;
+      const float drawMs = (drawUsTotal / 1000.0f) / frameCount;
+      const float pushMs = (pushUsTotal / 1000.0f) / frameCount;
+      const float totalMs = drawMs + pushMs;
+      Serial.printf(
+        "frame: draw %.1fms  push %.1fms  total %.1fms  %.1f fps  %.1f deg/frame"
+        "  heap %u (largest %u)\n",
+        drawMs, pushMs, totalMs,
+        totalMs > 0.0f ? 1000.0f / totalMs : 0.0f,
+        360.0f * (totalMs / static_cast<float>(radarSweepPeriodMs)),
+        ESP.getFreeHeap(), ESP.getMaxAllocHeap()
+      );
+      frameCount = 0;
+      drawUsTotal = 0;
+      pushUsTotal = 0;
+    }
   }
 }

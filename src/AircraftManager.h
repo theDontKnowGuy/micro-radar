@@ -126,6 +126,28 @@ private:
     void DrawAircraftRadarVector(LGFX_Sprite& backbuffer, int x, int y, const TrackedAircraft& tracked) const;
     void DrawAircraftTriangle(LGFX_Sprite& backbuffer, int x, int y, const TrackedAircraft& tracked) const;
     void ResolveNextDestination();
+
+    // Takes the single background worker if it is idle. On a true return the
+    // caller holds networkStateMutex and must hand it back through
+    // CommitNetworkJob(); on false nothing is held.
+    bool TryClaimNetworkWorker();
+    void CommitNetworkJob(NetworkJobType job, const String& icao = "", const String& callsign = "");
+
+    // Runs on the worker task: publishes a finished job's results and marks the
+    // worker idle in one critical section, so the render loop can never observe
+    // a free worker with its results not yet visible.
+    template<typename Publish>
+    void PublishNetworkResult(Publish publish)
+    {
+        if (networkStateMutex == nullptr ||
+            xSemaphoreTake(networkStateMutex, portMAX_DELAY) != pdTRUE)
+            return;
+
+        publish();
+        networkBusy = false;
+        xSemaphoreGive(networkStateMutex);
+    }
+
     bool ScheduleNetworkJob(NetworkJobType job, const String& icao = "", const String& callsign = "");
     bool ScheduleLabelLayout(const std::vector<RenderAircraft>& aircraft);
     void ConsumeNetworkResults();

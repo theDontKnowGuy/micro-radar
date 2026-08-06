@@ -2,30 +2,20 @@
 
 #include <LovyanGFX.hpp>
 
-#include "DisplayConfig.h"
-
-#if defined(PANEL_GC9B72)
 #include "Bus_GC9B72_SPI.hpp"
+#include "DisplayConfig.h"
 #include "Panel_GC9B72.hpp"
-#endif
 
 class LGFX : public lgfx::LGFX_Device
 {
-#if defined(PANEL_GC9B72)
     lgfx::Panel_GC9B72 _panel;
     // Not lgfx::Bus_SPI -- the GC9B72 needs half-duplex write-only transfers,
     // which only ESP-IDF's spi_master provides. See Bus_GC9B72_SPI.hpp.
     lgfx::Bus_GC9B72_SPI _bus;
-#else
-    lgfx::Panel_GC9A01 _panel;
-    lgfx::Bus_SPI _bus;
-#endif
 
 public:
     LGFX(void)
     {
-#if defined(PANEL_GC9B72)
-
         {
             auto cfg = _bus.config();
             cfg.spi_host = SPI2_HOST;
@@ -61,30 +51,6 @@ public:
             cfg.readable = false; // no SDO wired
             _panel.config(cfg);
         }
-
-#else
-
-        {
-            auto cfg = _bus.config();
-            cfg.spi_host = SPI2_HOST;
-            cfg.freq_write = 27000000;
-            cfg.pin_miso = -1;
-            cfg.pin_mosi = 12; // TFT SDA/MOSI
-            cfg.pin_sclk = 11; // TFT SCL/SCLK
-            cfg.pin_dc = 2;
-            _bus.config(cfg);
-            _panel.setBus(&_bus);
-        }
-        {
-            auto cfg = _panel.config();
-            cfg.pin_cs = 13;
-            cfg.pin_rst = -1;
-            cfg.pin_busy = -1;
-            // cfg.rgb_order = true;
-            _panel.config(cfg);
-        }
-
-#endif
 
         setPanel(&_panel);
     }
