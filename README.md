@@ -50,9 +50,6 @@ with `SSL - Memory allocation failed`.
 
 Check the voltage requirements of your exact display board before connecting power.
 
-> [!NOTE]
-> I do not have an ESP32-C3, so this fork has not been tested on one. The firmware compiles for the C3 and should theoretically work, but its single-core processor may be less smooth in dense scenes. The original combined C3/TFT module also requires its original display pin mapping.
-
 ## Wiring
 
 The pin assignment is defined in [`include/LGFX.h`](include/LGFX.h). **The two
@@ -111,12 +108,33 @@ The serial monitor runs at `115200` baud. If uploading fails, use your board's B
 > change wipes saved Wi-Fi credentials and every setting from the web UI, so the
 > radar comes back up in setup-hotspot mode. This happens once — later OTA
 > updates only rewrite an app slot and leave settings alone.
+>
+> You may also see this once per boot afterwards:
+>
+> ```text
+> E (253) esp_core_dump_flash: Incorrect size of core dump image: 1819042143
+> ```
+>
+> The coredump partition moved to `0x7F0000`, a region that previously held
+> leftover data, and the core dump component is reading those stale bytes as a
+> length. Nothing is broken — it just means there is no valid crash dump stored
+> — but you can silence it permanently by erasing that region once. An erased
+> partition is skipped without complaint:
+>
+> ```bash
+> esptool.py --chip esp32s3 --port /dev/cu.usbmodem11201 erase_region 0x7F0000 0x10000
+> ```
+>
+> Use `erase_region`, not `erase_flash` — the latter would clear your Wi-Fi
+> credentials and settings along with it.
 
 ## Over-the-air updates
 
-The radar checks GitHub for new firmware once an hour and installs anything
-newer on its own. No button to press and nothing to upload: publish a release
-and the fleet picks it up within the hour.
+The radar checks GitHub for new firmware once an hour and, by default, installs
+anything newer on its own. No button to press and nothing to upload: publish a
+release and the fleet picks it up within the hour. A radar set to **Ask me
+first** on its configuration page finds the release on the same schedule but
+waits for you to start the install.
 
 **How it works.** Flash holds two app slots. The running firmware downloads a
 new image into the slot it is *not* executing from, checks it against the MD5
@@ -163,6 +181,41 @@ release date, and what changed:
 These describe the build that is *running*, not the newest one published, which
 is the distinction that matters once units start updating themselves at
 different times.
+
+Next to them is a **Check for updates now** link, for when you have just
+published a release and do not want to wait out the hour. It reports back in
+place:
+
+```text
+Check for updates now - Up to date - 1.1.1 is the latest release
+Check for updates now - Version 1.2.0 found - installing now
+Check for updates now - Downloading 1.2.0 - 45 percent
+```
+
+If it finds something, the install starts immediately and the page loses the
+radar when it reboots — that is the expected ending, and the status says so.
+Reload once it is back to confirm the new version.
+
+### Automatic or manual
+
+The **Firmware updates** section of the configuration page decides what happens
+when a check finds a newer release:
+
+- **Install automatically** (default) — the radar downloads and installs it the
+  moment it finds it, then reboots. Unattended units stay current on their own.
+- **Ask me first** — the radar records the release and stops there. A small
+  amber `Update avail.` line appears above the location name on the radar
+  itself, and the configuration page offers an **Install now** button next to
+  the version footer, with the status reading `Version 1.2.0 is ready to
+  install`. Both persist for as long as the radar stays up, so one that found
+  something overnight is still showing it in the morning. A reboot clears the
+  reminder, but the check that runs a couple of minutes after boot finds the
+  same release again and puts it back.
+
+Installing takes about a minute, during which the display shows a progress bar
+instead of aircraft, which is the reason to hold it until a convenient moment.
+The setting is stored with the rest of the configuration and takes effect from
+the reboot that saving triggers.
 
 ### Publishing a release
 
@@ -227,19 +280,33 @@ reboots.
 
 ## Setup
 
-On first boot, connect to:
+With no network stored — on first boot, or after the stored one stops answering —
+the radar puts up its own hotspot:
 
 ```text
 MicroRadar-Setup
 ```
 
-Enter your Wi-Fi details. After the radar restarts, configure it from another device on the same network:
+Connect to it and the configuration page opens by itself; if your phone does not
+offer it, browse to the address shown on the radar's screen (`192.168.4.1`).
+
+It is the same page you get later over your own network, so the Wi-Fi details,
+the radar centre, the OpenSky credentials and the display options are all set in
+one go. Saving joins the network and starts the radar. Anything that needs the
+internet — place search, current location, the update check — is shown disabled
+until then, because the hotspot has no route to it.
+
+Afterwards the radar shows a *Configure me at* screen with its address, and the
+same page is reachable from any device on the network:
 
 ```text
 http://microradar.local
 ```
 
-If mDNS is unavailable, use the IP address shown by the serial monitor or router.
+If mDNS is unavailable, use the IP address shown on screen, by the serial monitor, or by your router.
+
+A wrong password just brings the hotspot back on the next boot, with everything
+else you entered still stored.
 
 ## Configuration
 
@@ -247,6 +314,7 @@ If mDNS is unavailable, use the IP address shown by the serial monitor or router
 
 The web page lets you set:
 
+- the Wi-Fi network, chosen from a scan or typed in if it is hidden;
 - radar centre and radius;
 - current, approximate, or searched location;
 - short location name shown at the bottom of the display;
@@ -258,7 +326,17 @@ The web page lets you set:
 
 When the surface-wind display is enabled, it uses an aviation-style readout. For example, `WND 32025G30KT` means wind from 320° at 25 knots, gusting to 30 knots.
 
+The Wi-Fi section also reports the address, signal, MAC, uptime and free memory,
+and can forget the stored network — which restarts the radar into its setup
+hotspot — or simply restart it.
+
 Saving restarts the radar.
+
+A device with no stored settings starts centred on Ben Gurion Airport
+(32.002714, 34.880919), with the surface-wind readout and route labels both on,
+so the first boot shows real traffic before anything is configured. These defaults
+apply only to keys that have never been set — an already-configured radar keeps
+what it has, and a setting turned off stays off.
 
 An [OpenSky Network](https://opensky-network.org/) account is optional but provides a larger request allowance. Route labels use [ADSBDB](https://www.adsbdb.com/), and center surface wind uses [Open-Meteo](https://open-meteo.com/). Place search uses [Nominatim](https://nominatim.org/), and approximate location uses [IPWhoIs](https://ipwhois.io/).
 

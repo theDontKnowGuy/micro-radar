@@ -1,7 +1,15 @@
 #include "ConfigurationWebServer.h"
+
+#include <vector>
+
 #include <ESPmDNS.h>
+#include <WiFi.h>
 
 #include "FirmwareVersion.h"
+
+// The radar answers every name on the setup hotspot, which is what makes a
+// phone open the page by itself instead of reporting no internet.
+static const IPAddress SetupPortalIp(192, 168, 4, 1);
 
 static String EscapeHtmlAttribute(const String& value) {
     String escaped;
@@ -18,6 +26,68 @@ static String EscapeHtmlAttribute(const String& value) {
     }
     return escaped;
 }
+
+// Status messages carry version numbers, URLs and error text from the updater,
+// any of which can contain a quote or a backslash that would break the JSON the
+// configuration page parses.
+static String EscapeJsonString(const String& value) {
+    String escaped;
+    escaped.reserve(value.length());
+    for (size_t i = 0; i < value.length(); ++i) {
+        const char c = value[i];
+        switch (c) {
+            case '"': escaped += F("\\\""); break;
+            case '\\': escaped += F("\\\\"); break;
+            case '\n': escaped += F("\\n"); break;
+            case '\r': escaped += F("\\r"); break;
+            case '\t': escaped += F("\\t"); break;
+            default:
+                if (static_cast<unsigned char>(c) < 0x20)
+                    escaped += ' ';
+                else
+                    escaped += c;
+                break;
+        }
+    }
+    return escaped;
+}
+
+// Reads as a duration rather than a number of milliseconds: this stands in for
+// the diagnostics page the Wi-Fi portal used to have, where "how long has it
+// been up" is the question actually being asked.
+static String FormatUptime(unsigned long milliseconds)
+{
+    const unsigned long seconds = milliseconds / 1000UL;
+    const unsigned long days = seconds / 86400UL;
+    const unsigned long hours = (seconds / 3600UL) % 24UL;
+    const unsigned long minutes = (seconds / 60UL) % 60UL;
+
+    char formatted[32];
+    if (days > 0)
+        snprintf(formatted, sizeof(formatted), "%lud %luh %lum", days, hours, minutes);
+    else if (hours > 0)
+        snprintf(formatted, sizeof(formatted), "%luh %lum", hours, minutes);
+    else
+        snprintf(formatted, sizeof(formatted), "%lum %lus", minutes, seconds % 60UL);
+
+    return String(formatted);
+}
+
+// Everything the page is rendered from, read once per request. The template
+// processor runs later, while the response is being written out, so it must not
+// be the thing that opens Preferences or asks the Wi-Fi driver anything.
+struct PageValues {
+    String latitude, longitude, locationName, radius;
+    String openskyClientId, openskySecret, geocoderUrl;
+    String scanlineEnabled, sweepPeriod, speedEnabled, speedUnit;
+    String altitudeEnabled, altitudeUnit, destinationEnabled, windEnabled;
+    String aircraftMarker, autoUpdate;
+
+    // Wi-Fi section and the mode it is being shown in.
+    String setupMode, wifiSsid, wifiPassPlaceholder;
+    String networkNote, networkOpen, networkSummary, forgetHidden, saveLabel;
+    String netIp, netRssi, netMac, netUptime, netHeap;
+};
 
 static String CleanLocationName(const String& value)
 {
@@ -183,6 +253,26 @@ static const char CONFIG_HTML[] PROGMEM = R"(
             .firmware-notes {
                 margin: .2rem 0 0;
             }
+            .firmware-update {
+                margin: .45rem 0 0;
+            }
+            .link-button {
+                border: 0;
+                padding: 0;
+                background: none;
+                color: var(--green);
+                font: inherit;
+                text-decoration: underline;
+                cursor: pointer;
+            }
+            .link-button:hover {
+                filter: brightness(1.15);
+            }
+            .link-button:disabled {
+                color: var(--muted);
+                text-decoration: none;
+                cursor: default;
+            }
             .config-form {
                 display: flex;
                 flex-direction: column;
@@ -237,6 +327,46 @@ static const char CONFIG_HTML[] PROGMEM = R"(
             .credentials {
                 display: grid;
                 gap: .75rem;
+            }
+            .network-details > summary {
+                color: var(--green);
+                font-weight: 650;
+            }
+            .network-grid {
+                display: grid;
+                gap: .75rem;
+            }
+            .ssid-row {
+                display: grid;
+                grid-template-columns: minmax(0, 1fr) auto;
+                gap: .7rem;
+            }
+            .ssid-row select {
+                width: auto;
+            }
+            .network-diagnostics {
+                display: grid;
+                grid-template-columns: max-content minmax(0, 1fr);
+                gap: .2rem .75rem;
+                margin: .9rem 0 0;
+                color: var(--muted);
+                font-size: .78rem;
+            }
+            .network-diagnostics dd {
+                margin: 0;
+                color: var(--text);
+                font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            }
+            .network-actions {
+                display: flex;
+                align-items: center;
+                gap: 1rem;
+                flex-wrap: wrap;
+                margin-top: .9rem;
+            }
+            .is-offline {
+                opacity: .45;
+                cursor: not-allowed;
             }
             .display-options {
                 display: grid;
@@ -345,6 +475,9 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                 width: 13.75rem;
             }
             .display-option .sweep-period-select {
+                width: 13.75rem;
+            }
+            .display-option .update-mode-select {
                 width: 13.75rem;
             }
             .display-option.is-disabled select {
@@ -460,7 +593,8 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                     grid-template-columns: minmax(0, 1fr);
                     gap: .3rem;
                 }
-                .place-search {
+                .place-search,
+                .ssid-row {
                     grid-template-columns: 1fr;
                 }
                 .place-results {
@@ -472,7 +606,8 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                     gap: .35rem;
                 }
                 .display-option .aircraft-marker-select,
-                .display-option .sweep-period-select {
+                .display-option .sweep-period-select,
+                .display-option .update-mode-select {
                     width: auto;
                     max-width: none;
                 }
@@ -487,12 +622,83 @@ static const char CONFIG_HTML[] PROGMEM = R"(
             }
         </style>
     </head>
-    <body>
+    <body data-net-mode="%NET_MODE%">
         <fieldset class="config-panel">
             <legend>Configure Micro Radar</legend>
 
-            <p class="config-intro">Set radar coverage, aircraft data, and display preferences.</p>
+            <p class="config-intro">Set the network, radar coverage, aircraft data, and display preferences.</p>
             <form id="cfg" action="/save" method="POST" class="config-form">
+
+                <fieldset class="config-section">
+                    <legend>Wi-Fi network</legend>
+                    <p class="section-note">%NETWORK_NOTE%</p>
+
+                    <details class="network-details" %NETWORK_OPEN%>
+                        <summary>%NETWORK_SUMMARY%</summary>
+                        <div class="network-grid mt-3">
+                            <div class="ssid-row">
+                                <select
+                                    id="wifi-ssid"
+                                    name="wifi-ssid"
+                                    data-current="%WIFI_SSID%"
+                                    aria-label="Available networks">
+                                    <option value="">Looking for networks...</option>
+                                </select>
+                                <button
+                                    id="rescan-wifi"
+                                    type="button">
+                                    Rescan
+                                </button>
+                            </div>
+
+                            <label class="field-row">
+                                <span>Other network:</span>
+                                <input
+                                    id="wifi-ssid-manual"
+                                    name="wifi-ssid-manual"
+                                    maxlength="32"
+                                    autocomplete="off"
+                                    spellcheck="false"
+                                    placeholder="Hidden or out-of-range network name">
+                            </label>
+
+                            <label class="field-row">
+                                <span>Password:</span>
+                                <input
+                                    id="wifi-pass"
+                                    name="wifi-pass"
+                                    type="password"
+                                    maxlength="63"
+                                    autocomplete="off"
+                                    spellcheck="false"
+                                    placeholder="%WIFI_PASS_PLACEHOLDER%">
+                            </label>
+
+                            <div class="text-xs">
+                                The radar joins 2.4 GHz networks only. Leave the password blank for an
+                                open network, or to keep the one already stored. A name typed above
+                                takes precedence over the list.
+                            </div>
+                            <div id="wifi-result" class="text-sm" aria-live="polite"></div>
+                        </div>
+                    </details>
+
+                    <dl class="network-diagnostics">
+                        <dt>Address</dt><dd>%NET_IP%</dd>
+                        <dt>Signal</dt><dd>%NET_RSSI%</dd>
+                        <dt>MAC</dt><dd>%NET_MAC%</dd>
+                        <dt>Uptime</dt><dd>%NET_UPTIME%</dd>
+                        <dt>Free memory</dt><dd>%NET_HEAP%</dd>
+                    </dl>
+
+                    <div class="network-actions">
+                        <button type="button" id="forget-wifi" class="link-button" %FORGET_HIDDEN%>
+                            Forget this network
+                        </button>
+                        <button type="button" id="restart-radar" class="link-button">Restart radar</button>
+                        <span id="network-action-result" class="text-sm" aria-live="polite"></span>
+                    </div>
+                </fieldset>
 
                 <fieldset class="config-section">
                     <legend>Radar coverage</legend>
@@ -592,7 +798,24 @@ static const char CONFIG_HTML[] PROGMEM = R"(
 
                 <fieldset class="config-section">
                     <legend>OpenSky connection</legend>
-                    <p class="section-note">Optional credentials increase API access limits.</p>
+                    <p class="section-note">
+                        Optional credentials increase API access limits. Without them the radar
+                        shares the anonymous allowance with everyone else on your public IP
+                        address, so aircraft refresh less often.
+                    </p>
+                    <p class="section-note">
+                        To get your own: register a free account at
+                        <a href="https://opensky-network.org/index.php?option=com_users&amp;view=registration"
+                           target="_blank" rel="noopener" class="underline">opensky-network.org</a>,
+                        sign in, then open
+                        <a href="https://opensky-network.org/my-opensky/account"
+                           target="_blank" rel="noopener" class="underline">Account &rarr; API client</a>
+                        and create a new API client. OpenSky shows the client secret only once,
+                        so copy both values into the fields below before leaving that page.
+                        Details are in the
+                        <a href="https://openskynetwork.github.io/opensky-api/rest.html"
+                           target="_blank" rel="noopener" class="underline">OpenSky API documentation</a>.
+                    </p>
                     <div class="credentials">
                     <label class="field-row">
                     <span>Client ID:</span>
@@ -701,10 +924,29 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                     </div>
                 </fieldset>
 
+                <fieldset class="config-section">
+                    <legend>Firmware updates</legend>
+                    <p class="section-note">
+                        The radar checks for a new release once an hour. Installing takes about a
+                        minute and ends with a restart, so the display is unavailable while it runs.
+                    </p>
+                    <div class="display-option display-option-select">
+                        <label for="auto-update">When a new release is found</label>
+                        <select
+                            id="auto-update"
+                            name="auto-update"
+                            class="update-mode-select"
+                            aria-label="Firmware update behaviour">
+                            <option value="true" %AUTO_UPDATE_ON_SELECTED%>Install automatically</option>
+                            <option value="false" %AUTO_UPDATE_OFF_SELECTED%>Ask me first</option>
+                        </select>
+                    </div>
+                </fieldset>
+
                 <div class="save-row">
                     <input
                         type="submit"
-                        value="Save"
+                        value="%SAVE_LABEL%"
                         class="save-button">
 
                     <div id="result" aria-live="polite"></div>
@@ -715,10 +957,19 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                 <span class="firmware-version">Firmware %FIRMWARE_VERSION%</span>
                 &middot; released %FIRMWARE_RELEASED%
                 <p class="firmware-notes">%FIRMWARE_NOTES%</p>
+                <p class="firmware-update">
+                    <button type="button" id="check-update" class="link-button">Check for updates now</button>
+                    <button type="button" id="install-update" class="link-button" hidden>Install now</button>
+                    <span id="update-status" aria-live="polite"></span>
+                </p>
             </div>
         </fieldset>
 
         <script>
+            // Setup mode means this page is being served from the radar's own
+            // hotspot, so nothing on the far side of the internet is reachable.
+            const setupMode = document.body.dataset.netMode === 'setup';
+
             const locationButton = document.getElementById('use-location');
             const locationResult = document.getElementById('location-result');
             const placeQuery = document.getElementById('place-query');
@@ -782,7 +1033,7 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                     });
             }
 
-            if (!window.isSecureContext) {
+            if (!window.isSecureContext && !setupMode) {
                 locationButton.textContent = 'Use approximate location';
                 locationResult.textContent =
                     'Exact browser location requires HTTPS; this uses your network/IP location.';
@@ -982,8 +1233,242 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                     : selected.textContent;
             });
 
+            const networkDetails = document.querySelector('.network-details');
+            const ssidSelect = document.getElementById('wifi-ssid');
+            const manualSsid = document.getElementById('wifi-ssid-manual');
+            const rescanButton = document.getElementById('rescan-wifi');
+            const wifiResult = document.getElementById('wifi-result');
+            let scanPolls = 0;
+            let scanStarted = false;
+
+            function signalWords(rssi) {
+                if (rssi >= -55) return 'excellent';
+                if (rssi >= -67) return 'good';
+                if (rssi >= -75) return 'fair';
+                return 'weak';
+            }
+
+            function showNetworks(networks) {
+                const current = ssidSelect.dataset.current || '';
+                ssidSelect.replaceChildren();
+
+                const blank = document.createElement('option');
+                blank.value = '';
+                blank.textContent = networks.length ? 'Select a network' : 'No networks found';
+                ssidSelect.appendChild(blank);
+
+                networks.forEach(function(network) {
+                    const option = document.createElement('option');
+                    option.value = network.ssid;
+                    option.textContent = network.ssid + ' - signal ' + signalWords(network.rssi)
+                        + (network.secure ? '' : ', open');
+                    option.selected = network.ssid === current;
+                    ssidSelect.appendChild(option);
+                });
+
+                wifiResult.textContent = networks.length
+                    ? ''
+                    : 'Nothing in range. Type the network name below if it is hidden.';
+            }
+
+            // The radar answers the first request by starting a scan and saying
+            // so; the results arrive on a later one. Scanning takes a few
+            // seconds and cannot be done on the web server's task.
+            function pollScan() {
+                fetch('/wifi/scan', { cache: 'no-store' })
+                    .then(r => r.json())
+                    .then(function(data) {
+                        if (data.scanning) {
+                            scanPolls += 1;
+                            if (scanPolls > 20) {
+                                wifiResult.textContent =
+                                    'The scan is taking too long. Press Rescan to try again.';
+                                rescanButton.disabled = false;
+                                return;
+                            }
+                            setTimeout(pollScan, 1000);
+                            return;
+                        }
+                        showNetworks(data.networks || []);
+                        rescanButton.disabled = false;
+                    })
+                    .catch(function() {
+                        wifiResult.textContent = 'Could not reach the radar to scan.';
+                        rescanButton.disabled = false;
+                    });
+            }
+
+            function scanNetworks() {
+                scanStarted = true;
+                scanPolls = 0;
+                rescanButton.disabled = true;
+                wifiResult.textContent = 'Looking for networks...';
+                pollScan();
+            }
+
+            rescanButton.addEventListener('click', scanNetworks);
+
+            // A scan drops the station connection for a moment, which would cut
+            // off the very page requesting it. In normal operation it therefore
+            // waits until someone opens the section to change networks.
+            if (setupMode) {
+                scanNetworks();
+            } else {
+                networkDetails.addEventListener('toggle', function() {
+                    if (networkDetails.open && !scanStarted)
+                        scanNetworks();
+                });
+            }
+
+            const forgetButton = document.getElementById('forget-wifi');
+            const restartButton = document.getElementById('restart-radar');
+            const networkActionResult = document.getElementById('network-action-result');
+
+            // Both of these end in a reboot, so the connection dropping is the
+            // expected finish rather than a failure worth reporting.
+            function postNetworkAction(url, pending, done) {
+                networkActionResult.textContent = pending;
+                forgetButton.disabled = true;
+                restartButton.disabled = true;
+                fetch(url, { method: 'POST' })
+                    .then(function() { networkActionResult.textContent = done; })
+                    .catch(function() { networkActionResult.textContent = done; });
+            }
+
+            forgetButton.addEventListener('click', function() {
+                if (!confirm('Forget the stored Wi-Fi network? The radar restarts into its setup hotspot.'))
+                    return;
+                postNetworkAction(
+                    '/wifi/forget',
+                    'Forgetting...',
+                    'Restarting into setup mode. Connect to the MicroRadar-Setup hotspot.'
+                );
+            });
+
+            restartButton.addEventListener('click', function() {
+                if (!confirm('Restart the radar now?'))
+                    return;
+                postNetworkAction('/restart', 'Restarting...', 'Restarting. Reload this page in a minute.');
+            });
+
+            const checkButton = document.getElementById('check-update');
+            const installButton = document.getElementById('install-update');
+            const updateStatus = document.getElementById('update-status');
+            let updatePolls = 0;
+
+            function showUpdateStatus(text) {
+                updateStatus.textContent = text ? ' - ' + text : '';
+            }
+
+            // In "Ask me first" mode a found release sits there until someone
+            // presses Install, so the button follows the radar's own view of
+            // whether it is waiting rather than anything remembered here.
+            function applyUpdateState(state) {
+                showUpdateStatus(state.message);
+                installButton.hidden = !state.awaiting;
+                if (state.awaiting)
+                    installButton.disabled = false;
+            }
+
+            function pollUpdateStatus() {
+                fetch('/update/status', { cache: 'no-store' })
+                    .then(r => r.json())
+                    .then(function(state) {
+                        applyUpdateState(state);
+                        updatePolls += 1;
+
+                        // Anything else means the radar is still working on it.
+                        // Downloading deliberately keeps polling until the
+                        // reboot cuts the connection.
+                        const settled = state.status === 'up-to-date'
+                            || state.status === 'failed'
+                            || state.status === 'idle'
+                            || state.awaiting;
+
+                        if (settled || updatePolls > 60) {
+                            checkButton.disabled = false;
+                            return;
+                        }
+                        setTimeout(pollUpdateStatus, 2000);
+                    })
+                    .catch(function() {
+                        // Installing ends with a restart, so losing the radar
+                        // mid-poll is the expected finish, not a failure.
+                        showUpdateStatus('radar restarting, reload this page in a minute');
+                        checkButton.disabled = false;
+                    });
+            }
+
+            checkButton.addEventListener('click', function() {
+                checkButton.disabled = true;
+                installButton.hidden = true;
+                updatePolls = 0;
+                showUpdateStatus('checking...');
+                fetch('/update/check', { method: 'POST' })
+                    .then(() => setTimeout(pollUpdateStatus, 1500))
+                    .catch(function() {
+                        showUpdateStatus('could not reach the radar');
+                        checkButton.disabled = false;
+                    });
+            });
+
+            installButton.addEventListener('click', function() {
+                installButton.disabled = true;
+                checkButton.disabled = true;
+                updatePolls = 0;
+                showUpdateStatus('starting install...');
+                fetch('/update/install', { method: 'POST' })
+                    .then(() => setTimeout(pollUpdateStatus, 1500))
+                    .catch(function() {
+                        showUpdateStatus('could not reach the radar');
+                        installButton.disabled = false;
+                        checkButton.disabled = false;
+                    });
+            });
+
+            // Every control that has to reach past the radar itself: browser
+            // geolocation and its IP fallback, the place search, and the update
+            // check. On the setup hotspot they would all simply time out, so
+            // say why instead of letting them be pressed.
+            if (setupMode) {
+                const offlineNote = 'Available once the radar has joined your network.';
+                [
+                    [locationButton, locationResult],
+                    [placeSearchButton, placeResult],
+                    [checkButton, updateStatus]
+                ].forEach(function(control) {
+                    control[0].disabled = true;
+                    control[0].classList.add('is-offline');
+                    control[1].textContent = offlineNote;
+                });
+                placeQuery.disabled = true;
+            }
+
+            // A release found by the hourly check may already be waiting when
+            // this page is opened, so show that without making anyone press
+            // "check" to rediscover it.
+            if (!setupMode) {
+                fetch('/update/status', { cache: 'no-store' })
+                    .then(r => r.json())
+                    .then(function(state) {
+                        if (state.awaiting)
+                            applyUpdateState(state);
+                    })
+                    .catch(function() {});
+            }
+
             document.getElementById('cfg').addEventListener('submit', function(e) {
                 e.preventDefault();
+
+                // Saving from the hotspot with no network chosen would reboot
+                // straight back into the hotspot, having stored everything else
+                // but still with nowhere to go.
+                if (setupMode && !ssidSelect.value && !manualSsid.value.trim()) {
+                    networkDetails.open = true;
+                    wifiResult.textContent = 'Choose a network, or type its name, before saving.';
+                    return;
+                }
+
                 fetch(this.action, { method: 'POST', body: new FormData(this) })
                     .then(r => r.text())
                     .then(html => document.getElementById('result').innerHTML = html);
@@ -1001,9 +1486,26 @@ void ConfigurationWebServer::EnsureDefaults() {
             prefs.putString(key, defaultValue);
     };
 
-    ensureKey("latitude", "");
-    ensureKey("longitude", "");
-    ensureKey("location-name", "");
+    // Empty means "no network known", which is what sends the radar to its
+    // setup hotspot on the next boot.
+    ensureKey("wifi-ssid", "");
+    ensureKey("wifi-pass", "");
+
+    // Left behind by firmware that finished first setup in two passes: the
+    // Wi-Fi portal, a reboot, then a hold on the configuration screen. The page
+    // now takes the network and the settings in one submission, so the flag has
+    // nothing left to mean. Removed rather than ignored so it cannot be read
+    // back by mistake later.
+    if (prefs.isKey("setup-pending"))
+        prefs.remove("setup-pending");
+
+    // A radar centred on nothing shows nothing, and an empty first screen reads
+    // as a broken device rather than an unconfigured one. Ben Gurion is busy
+    // enough that traffic appears within a sweep or two, which is the quickest
+    // way to prove the unit works before the owner sets their own centre.
+    ensureKey("latitude", "32.002714");
+    ensureKey("longitude", "34.880919");
+    ensureKey("location-name", "Ben Gurion Airport");
     ensureKey("radius", "1.0");
     ensureKey("opensky-id", "");
     ensureKey("opensky-secret", "");
@@ -1020,13 +1522,24 @@ void ConfigurationWebServer::EnsureDefaults() {
     ensureKey("speed-unit", "knots");
     ensureKey("altitude", "true");
     ensureKey("altitude-unit", "feet");
-    ensureKey("destination", "false");
-    ensureKey("wind", "false");
+    ensureKey("destination", "true");
+    ensureKey("wind", "true");
+
+    // Automatic by default: an unattended radar that quietly keeps itself
+    // current is the behaviour most owners want, and the alternative leaves
+    // security fixes waiting on someone opening this page.
+    ensureKey("auto-update", "true");
 
     prefs.end();
 }
 
-void ConfigurationWebServer::Initialise() {
+void ConfigurationWebServer::Initialise(FirmwareUpdater& updater, Mode serveMode) {
+    // Stored before any route is registered: the handlers below reach it
+    // through `this`, so capturing the parameter by reference would leave them
+    // pointing at a stack frame that is gone by the first request.
+    firmwareUpdater = &updater;
+    mode = serveMode;
+
     EnsureDefaults();
 
     // start mDNS and check result
@@ -1034,67 +1547,125 @@ void ConfigurationWebServer::Initialise() {
         Serial.println("[WARN] Failed to start mDNS. Continuing without mDNS...");
     }
 
+    if (mode == Mode::Setup) {
+        // Every lookup resolves to the radar. Together with the redirect in
+        // onNotFound below, this is what makes a phone joining the hotspot open
+        // the configuration page on its own.
+        dns.setErrorReplyCode(DNSReplyCode::NoError);
+        dns.start(53, "*", SetupPortalIp);
+    }
+
     // Handle visit to config web server
-    server.on("/", HTTP_GET, [&](AsyncWebServerRequest* request) {
+    server.on("/", HTTP_GET, [this](AsyncWebServerRequest* request) {
         Serial.println("[GET] Handling request to config web server...");
+
+        const bool setupMode = mode == Mode::Setup;
 
         // read all values up front so the processor lambda can capture by value
         prefs.begin("config", true);
-        const String latitude = EscapeHtmlAttribute(prefs.getString("latitude", ""));
-        const String longitude = EscapeHtmlAttribute(prefs.getString("longitude", ""));
-        const String locationName = EscapeHtmlAttribute(prefs.getString("location-name", ""));
-        const String radius = EscapeHtmlAttribute(prefs.getString("radius", "1.0"));
-        const String openskyClientId = EscapeHtmlAttribute(prefs.getString("opensky-id", ""));
+        PageValues values;
+        values.latitude = EscapeHtmlAttribute(prefs.getString("latitude", ""));
+        values.longitude = EscapeHtmlAttribute(prefs.getString("longitude", ""));
+        values.locationName = EscapeHtmlAttribute(prefs.getString("location-name", ""));
+        values.radius = EscapeHtmlAttribute(prefs.getString("radius", "1.0"));
+        values.openskyClientId = EscapeHtmlAttribute(prefs.getString("opensky-id", ""));
         String openskySecret = prefs.getString("opensky-secret", "");
-        const String geocoderUrl = EscapeHtmlAttribute(
+        values.geocoderUrl = EscapeHtmlAttribute(
             prefs.getString("geocoder-url", "https://nominatim.openstreetmap.org/search")
         );
-        const String scanlineEnabled = prefs.getString("scanline", "true");
-        const String sweepPeriod = prefs.getString("sweep-period", "5");
-        const String speedEnabled = prefs.getString("speed", "true");
-        const String speedUnit = prefs.getString("speed-unit", "knots");
-        const String altitudeEnabled = prefs.getString("altitude", "true");
-        const String altitudeUnit = prefs.getString("altitude-unit", "feet");
-        const String destinationEnabled = prefs.getString("destination", "false");
-        const String windEnabled = prefs.getString("wind", "false");
-        const String aircraftMarker = prefs.getString("aircraft-marker", "radar");
+        values.scanlineEnabled = prefs.getString("scanline", "true");
+        values.sweepPeriod = prefs.getString("sweep-period", "5");
+        values.speedEnabled = prefs.getString("speed", "true");
+        values.speedUnit = prefs.getString("speed-unit", "knots");
+        values.altitudeEnabled = prefs.getString("altitude", "true");
+        values.altitudeUnit = prefs.getString("altitude-unit", "feet");
+        values.destinationEnabled = prefs.getString("destination", "false");
+        values.windEnabled = prefs.getString("wind", "false");
+        values.aircraftMarker = prefs.getString("aircraft-marker", "radar");
+        values.autoUpdate = prefs.getString("auto-update", "true");
+        const String storedSsid = prefs.getString("wifi-ssid", "");
         prefs.end();
 
         // mask secret before sending to client
         for (size_t i = 0; i < openskySecret.length(); ++i) {
             openskySecret[i] = '*';
         }
+        values.openskySecret = openskySecret;
+
+        // The Wi-Fi password is never sent back, masked or otherwise: an empty
+        // field means "leave the stored one alone", which also spares the page
+        // the guesswork the OpenSky secret needs on save.
+        values.wifiSsid = EscapeHtmlAttribute(storedSsid);
+        values.setupMode = setupMode ? "setup" : "station";
+        values.networkOpen = setupMode ? "open" : "";
+        values.networkSummary = setupMode ? "Choose a network" : "Change network";
+        values.forgetHidden = setupMode ? "hidden" : "";
+        values.saveLabel = setupMode ? "Save and connect" : "Save";
+        values.wifiPassPlaceholder = setupMode
+            ? "Network password"
+            : "Leave blank to keep the stored password";
+        values.networkNote = setupMode
+            ? "The radar is serving this page from its own hotspot. Pick your network below "
+              "and set everything else on this page at the same time -- saving joins the "
+              "network and starts the radar."
+            : (storedSsid.length()
+                ? "Connected to " + EscapeHtmlAttribute(storedSsid) + "."
+                : String("Connected."));
+
+        // Stands in for the separate info page the old Wi-Fi portal had.
+        values.netIp = setupMode
+            ? WiFi.softAPIP().toString() + " (setup hotspot)"
+            : WiFi.localIP().toString();
+        values.netRssi = setupMode ? String("access point mode") : String(WiFi.RSSI()) + " dBm";
+        values.netMac = WiFi.macAddress();
+        values.netUptime = FormatUptime(millis());
+        values.netHeap = String(ESP.getFreeHeap() / 1024) + " KB free";
 
         // template processor called once per %PLACEHOLDER% token found in CONFIG_HTML.
         AsyncWebServerResponse* response = request->beginResponse(
             200, "text/html",
             (const uint8_t*)CONFIG_HTML, sizeof(CONFIG_HTML) - 1,
-            [latitude, longitude, locationName, radius, openskyClientId, openskySecret, geocoderUrl, scanlineEnabled, sweepPeriod, speedEnabled, speedUnit, altitudeEnabled, altitudeUnit, destinationEnabled, windEnabled, aircraftMarker]
-            (const String& var) -> String {
-                if (var == "LATITUDE")       return latitude;
-                if (var == "LONGITUDE")      return longitude;
-                if (var == "LOCATION_NAME")  return locationName;
-                if (var == "RADIUS")         return radius;
-                if (var == "OPENSKY_ID")     return openskyClientId;
-                if (var == "OPENSKY_SECRET") return openskySecret;
-                if (var == "GEOCODER_URL")   return geocoderUrl;
-                if (var == "SCANLINE")       return scanlineEnabled == "true" ? "checked" : "";
-                if (var == "SWEEP_2_SELECTED") return sweepPeriod == "2" ? "selected" : "";
-                if (var == "SWEEP_5_SELECTED") return sweepPeriod == "5" ? "selected" : "";
-                if (var == "SWEEP_10_SELECTED") return sweepPeriod == "10" ? "selected" : "";
-                if (var == "SWEEP_18_SELECTED") return sweepPeriod == "18" ? "selected" : "";
-                if (var == "SWEEP_30_SELECTED") return sweepPeriod == "30" ? "selected" : "";
-                if (var == "SPEED")          return speedEnabled == "true" ? "checked" : "";
-                if (var == "SPEED_KNOTS_SELECTED") return speedUnit == "knots" ? "selected" : "";
-                if (var == "SPEED_MS_SELECTED") return speedUnit == "meters-second" ? "selected" : "";
-                if (var == "ALTITUDE")       return altitudeEnabled == "true" ? "checked" : "";
-                if (var == "ALTITUDE_FEET_SELECTED") return altitudeUnit == "feet" || altitudeUnit == "kft" ? "selected" : "";
-                if (var == "ALTITUDE_METERS_SELECTED") return altitudeUnit == "meters" ? "selected" : "";
-                if (var == "DESTINATION")    return destinationEnabled == "true" ? "checked" : "";
-                if (var == "WIND")           return windEnabled == "true" ? "checked" : "";
-                if (var == "MARKER_RADAR_SELECTED") return aircraftMarker == "radar" ? "selected" : "";
-                if (var == "MARKER_TRIANGLE_SELECTED") return aircraftMarker == "triangle" ? "selected" : "";
-                if (var == "MARKER_DOT_SELECTED") return aircraftMarker == "dot" ? "selected" : "";
+            [values](const String& var) -> String {
+                if (var == "NET_MODE")       return values.setupMode;
+                if (var == "NETWORK_NOTE")   return values.networkNote;
+                if (var == "NETWORK_OPEN")   return values.networkOpen;
+                if (var == "NETWORK_SUMMARY") return values.networkSummary;
+                if (var == "WIFI_SSID")      return values.wifiSsid;
+                if (var == "WIFI_PASS_PLACEHOLDER") return values.wifiPassPlaceholder;
+                if (var == "FORGET_HIDDEN")  return values.forgetHidden;
+                if (var == "SAVE_LABEL")     return values.saveLabel;
+                if (var == "NET_IP")         return values.netIp;
+                if (var == "NET_RSSI")       return values.netRssi;
+                if (var == "NET_MAC")        return values.netMac;
+                if (var == "NET_UPTIME")     return values.netUptime;
+                if (var == "NET_HEAP")       return values.netHeap;
+
+                if (var == "LATITUDE")       return values.latitude;
+                if (var == "LONGITUDE")      return values.longitude;
+                if (var == "LOCATION_NAME")  return values.locationName;
+                if (var == "RADIUS")         return values.radius;
+                if (var == "OPENSKY_ID")     return values.openskyClientId;
+                if (var == "OPENSKY_SECRET") return values.openskySecret;
+                if (var == "GEOCODER_URL")   return values.geocoderUrl;
+                if (var == "SCANLINE")       return values.scanlineEnabled == "true" ? "checked" : "";
+                if (var == "SWEEP_2_SELECTED") return values.sweepPeriod == "2" ? "selected" : "";
+                if (var == "SWEEP_5_SELECTED") return values.sweepPeriod == "5" ? "selected" : "";
+                if (var == "SWEEP_10_SELECTED") return values.sweepPeriod == "10" ? "selected" : "";
+                if (var == "SWEEP_18_SELECTED") return values.sweepPeriod == "18" ? "selected" : "";
+                if (var == "SWEEP_30_SELECTED") return values.sweepPeriod == "30" ? "selected" : "";
+                if (var == "SPEED")          return values.speedEnabled == "true" ? "checked" : "";
+                if (var == "SPEED_KNOTS_SELECTED") return values.speedUnit == "knots" ? "selected" : "";
+                if (var == "SPEED_MS_SELECTED") return values.speedUnit == "meters-second" ? "selected" : "";
+                if (var == "ALTITUDE")       return values.altitudeEnabled == "true" ? "checked" : "";
+                if (var == "ALTITUDE_FEET_SELECTED") return values.altitudeUnit == "feet" || values.altitudeUnit == "kft" ? "selected" : "";
+                if (var == "ALTITUDE_METERS_SELECTED") return values.altitudeUnit == "meters" ? "selected" : "";
+                if (var == "DESTINATION")    return values.destinationEnabled == "true" ? "checked" : "";
+                if (var == "WIND")           return values.windEnabled == "true" ? "checked" : "";
+                if (var == "MARKER_RADAR_SELECTED") return values.aircraftMarker == "radar" ? "selected" : "";
+                if (var == "MARKER_TRIANGLE_SELECTED") return values.aircraftMarker == "triangle" ? "selected" : "";
+                if (var == "MARKER_DOT_SELECTED") return values.aircraftMarker == "dot" ? "selected" : "";
+                if (var == "AUTO_UPDATE_ON_SELECTED")  return values.autoUpdate != "false" ? "selected" : "";
+                if (var == "AUTO_UPDATE_OFF_SELECTED") return values.autoUpdate == "false" ? "selected" : "";
 
                 // Describes the build that is actually running, which after an
                 // over-the-air update is not necessarily the one that was
@@ -1113,6 +1684,142 @@ void ConfigurationWebServer::Initialise() {
         request->send(response);
         }
     );
+
+    // Network list for the Wi-Fi section. A scan takes several seconds, which
+    // is far too long to hold the web server's task, so the first request
+    // starts one and answers "scanning"; the page asks again until results
+    // appear. Consuming them frees the scan, so the next first request starts a
+    // fresh one -- which is exactly what the Rescan button wants.
+    server.on("/wifi/scan", HTTP_GET, [this](AsyncWebServerRequest* request) {
+        const int16_t found = WiFi.scanComplete();
+
+        if (found == WIFI_SCAN_RUNNING) {
+            request->send(200, "application/json", "{\"scanning\":true}");
+            return;
+        }
+
+        if (found < 0) {
+            Serial.println("[GET] Starting Wi-Fi scan");
+            WiFi.scanNetworks(true, false);
+            request->send(200, "application/json", "{\"scanning\":true}");
+            return;
+        }
+
+        // Strongest first, and only once per name: a mesh network answers from
+        // every node it has, and a list of six identical names is no use to
+        // anyone choosing one.
+        std::vector<int16_t> order;
+        order.reserve(found);
+        for (int16_t i = 0; i < found; ++i) {
+            const String ssid = WiFi.SSID(i);
+            if (ssid.isEmpty())
+                continue;
+
+            bool duplicate = false;
+            for (const int16_t seen : order)
+                duplicate = duplicate || WiFi.SSID(seen) == ssid;
+            if (duplicate)
+                continue;
+
+            const int32_t rssi = WiFi.RSSI(i);
+            auto position = order.begin();
+            while (position != order.end() && WiFi.RSSI(*position) >= rssi)
+                ++position;
+            order.insert(position, i);
+        }
+
+        String body = "{\"scanning\":false,\"networks\":[";
+        for (size_t i = 0; i < order.size(); ++i) {
+            if (i > 0)
+                body += ',';
+            body += "{\"ssid\":\"" + EscapeJsonString(WiFi.SSID(order[i])) +
+                    "\",\"rssi\":" + String(WiFi.RSSI(order[i])) +
+                    ",\"secure\":" +
+                    (WiFi.encryptionType(order[i]) == WIFI_AUTH_OPEN ? "false" : "true") + '}';
+        }
+        body += "]}";
+
+        WiFi.scanDelete();
+
+        AsyncWebServerResponse* response = request->beginResponse(200, "application/json", body);
+        response->addHeader("Cache-Control", "no-store");
+        request->send(response);
+    });
+
+    // Drops the stored network and reboots, which lands in setup mode. The
+    // credentials the Wi-Fi driver keeps in its own NVS entry are deliberately
+    // left alone -- they are only ever read by the one-shot import in main.cpp,
+    // which the flag written here permanently disables.
+    server.on("/wifi/forget", HTTP_POST, [this](AsyncWebServerRequest* request) {
+        Serial.println("[POST] Forgetting stored Wi-Fi network");
+        prefs.begin("config", false);
+        prefs.putString("wifi-ssid", "");
+        prefs.putString("wifi-pass", "");
+        prefs.putString("wifi-imported", "true");
+        prefs.end();
+
+        request->send(200, "text/plain", "Wi-Fi forgotten - restarting into setup mode");
+        restartRequested.store(true);
+    });
+
+    server.on("/restart", HTTP_POST, [this](AsyncWebServerRequest* request) {
+        Serial.println("[POST] Restart requested from the configuration page");
+        request->send(200, "text/plain", "Restarting");
+        restartRequested.store(true);
+    });
+
+    // On the setup hotspot every unrecognised path is a phone checking whether
+    // the network has internet: /generate_204 on Android, /hotspot-detect.html
+    // on iOS and macOS, /connecttest.txt and /ncsi.txt on Windows. Answering
+    // with a redirect rather than the expected body is what makes each of them
+    // pop the configuration page up by itself.
+    server.onNotFound([this](AsyncWebServerRequest* request) {
+        if (mode != Mode::Setup) {
+            request->send(404, "text/plain", "Not found");
+            return;
+        }
+
+        AsyncWebServerResponse* response = request->beginResponse(302, "text/plain", "");
+        response->addHeader("Location", String("http://") + SetupPortalIp.toString() + "/");
+        response->addHeader("Cache-Control", "no-store");
+        request->send(response);
+    });
+
+    // Ask the updater to look now instead of waiting for its hourly tick. This
+    // returns as soon as the request is queued -- the manifest fetch needs a
+    // TLS handshake, which does not belong on the web server's task -- so the
+    // page polls /update/status afterwards to find out how it went.
+    server.on("/update/check", HTTP_POST, [this](AsyncWebServerRequest* request) {
+        Serial.println("[POST] Manual update check requested");
+        if (firmwareUpdater != nullptr)
+            firmwareUpdater->RequestCheckNow();
+        request->send(202, "application/json", "{\"accepted\":true}");
+    });
+
+    // Installs the release the last check found. Only reachable in "ask me
+    // first" mode -- with automatic updates the render loop has already taken
+    // it -- so this is the owner answering that question.
+    server.on("/update/install", HTTP_POST, [this](AsyncWebServerRequest* request) {
+        Serial.println("[POST] Manual firmware install requested");
+        const bool accepted = firmwareUpdater != nullptr && firmwareUpdater->RequestInstallNow();
+        request->send(accepted ? 202 : 409, "application/json",
+                      accepted ? "{\"accepted\":true}"
+                               : "{\"accepted\":false,\"reason\":\"no release waiting\"}");
+    });
+
+    server.on("/update/status", HTTP_GET, [this](AsyncWebServerRequest* request) {
+        String body = "{\"status\":\"idle\",\"message\":\"\",\"awaiting\":false}";
+        if (firmwareUpdater != nullptr) {
+            const FirmwareUpdater::StatusSnapshot snapshot = firmwareUpdater->CurrentStatus();
+            body = String("{\"status\":\"") + FirmwareUpdater::StatusName(snapshot.status) +
+                   "\",\"message\":\"" + EscapeJsonString(snapshot.message) +
+                   "\",\"awaiting\":" + (snapshot.awaitingConfirmation ? "true" : "false") + "}";
+        }
+
+        AsyncWebServerResponse* response = request->beginResponse(200, "application/json", body);
+        response->addHeader("Cache-Control", "no-store");
+        request->send(response);
+    });
 
     // Handle save submission to web server
     server.on("/save", HTTP_POST, [&](AsyncWebServerRequest* request) {
@@ -1157,12 +1864,50 @@ void ConfigurationWebServer::Initialise() {
                 prefs.putString("aircraft-marker", marker);
         }
 
+        const auto* autoUpdateParam = request->getParam("auto-update", true);
+        if (autoUpdateParam != nullptr) {
+            const String autoUpdate = autoUpdateParam->value();
+            if (autoUpdate == "true" || autoUpdate == "false")
+                prefs.putString("auto-update", autoUpdate);
+        }
+
         const auto* param = request->getParam("opensky-secret", true);
         if (param != nullptr) {
             const String& secret = param->value();
             if (secret.indexOf('*') == -1) { // Special handling for secret: don't overwrite with masked value
                 prefs.putString("opensky-secret", secret);
             }
+        }
+
+        // A name typed into the "other network" box wins over the scan list, so
+        // a hidden network can be joined without it ever appearing there.
+        String ssid;
+        const auto* manualSsidParam = request->getParam("wifi-ssid-manual", true);
+        if (manualSsidParam != nullptr)
+            ssid = manualSsidParam->value();
+        ssid.trim();
+        if (ssid.isEmpty()) {
+            const auto* ssidParam = request->getParam("wifi-ssid", true);
+            if (ssidParam != nullptr)
+                ssid = ssidParam->value();
+        }
+
+        if (!ssid.isEmpty()) {
+            const String previousSsid = prefs.getString("wifi-ssid", "");
+            prefs.putString("wifi-ssid", ssid);
+
+            // The page never receives the stored password, so an empty field is
+            // "leave it alone" -- unless the network itself is changing, where
+            // keeping the old network's password would be nonsense and empty is
+            // how an open network is entered.
+            const auto* passwordParam = request->getParam("wifi-pass", true);
+            const String password = passwordParam != nullptr ? passwordParam->value() : String("");
+            if (!password.isEmpty() || ssid != previousSsid)
+                prefs.putString("wifi-pass", password);
+
+            // Whatever the Wi-Fi driver still has stored from a WiFiManager-era
+            // build is now stale. See /wifi/forget.
+            prefs.putString("wifi-imported", "true");
         }
 
         prefs.putString("scanline", request->hasParam("scanline", true) ? "true" : "false");
@@ -1172,7 +1917,12 @@ void ConfigurationWebServer::Initialise() {
         prefs.putString("wind", request->hasParam("wind", true) ? "true" : "false");
         prefs.end();
 
-        request->send(200, "text/html", "Saved - restarting device...");
+        request->send(200, "text/html",
+            mode == Mode::Setup
+                ? "Saved - joining " + EscapeHtmlAttribute(ssid) +
+                  ". This hotspot disappears now; reconnect to your own network and open "
+                  "http://microradar.local"
+                : String("Saved - restarting device..."));
 
         // Deliberately not ESP.restart() here: this runs on the AsyncTCP task,
         // and resetting mid-frame leaves SPI DMA transfers in flight, which
@@ -1191,4 +1941,19 @@ String ConfigurationWebServer::GetStoredString(const char* key)
     const String value = prefs.getString(key, "");
     prefs.end();
     return value;
+}
+
+void ConfigurationWebServer::SaveWiFiCredentials(const String& ssid, const String& password)
+{
+    prefs.begin("config", false);
+    prefs.putString("wifi-ssid", ssid);
+    prefs.putString("wifi-pass", password);
+    prefs.putString("wifi-imported", "true");
+    prefs.end();
+}
+
+void ConfigurationWebServer::PumpCaptivePortal()
+{
+    if (mode == Mode::Setup)
+        dns.processNextRequest();
 }

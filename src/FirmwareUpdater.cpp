@@ -80,18 +80,50 @@ void FirmwareUpdater::CheckTaskEntry(void* context)
 
 void FirmwareUpdater::CheckTaskLoop()
 {
-    vTaskDelay(pdMS_TO_TICKS(FIRST_CHECK_DELAY_MS));
+    // Waiting on a notification rather than sleeping outright is what lets the
+    // "check now" control on the configuration page jump the queue: the wait
+    // ends either when someone asks or when the interval runs out.
+    uint32_t waitMs = FIRST_CHECK_DELAY_MS;
 
     while (true) {
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(waitMs));
+        waitMs = CHECK_INTERVAL_MS;
+
         // Nothing raises the flag but this task, and nothing clears it but a
         // successful install followed by a reboot. Once something is pending
         // there is no point looking again -- keep the radio quiet and let the
         // main loop get to it.
-        if (!updatePending.load() && WiFi.status() == WL_CONNECTED)
-            CheckForUpdate();
+        if (updatePending.load())
+            continue;
 
-        vTaskDelay(pdMS_TO_TICKS(CHECK_INTERVAL_MS));
+        // Manual mode parks here between the release being found and the owner
+        // pressing Install. Fetching the manifest again would return the same
+        // answer, so just restate it -- a "check now" pressed in the meantime
+        // gets a reply instead of leaving the page polling a stale "checking".
+        if (updateAvailable.load()) {
+            AnnouncePendingRelease();
+            continue;
+        }
+
+        if (WiFi.status() != WL_CONNECTED) {
+            SetStatus(Status::Failed, "not connected to Wi-Fi");
+            continue;
+        }
+
+        CheckForUpdate();
     }
+}
+
+void FirmwareUpdater::RequestCheckNow()
+{
+    if (checkTaskHandle == nullptr)
+        return;
+
+    // Set here rather than on the checker task so the page shows "checking"
+    // from the moment the request is accepted, not whenever the task is
+    // scheduled next.
+    SetStatus(Status::Checking, "Checking for updates");
+    xTaskNotifyGive(checkTaskHandle);
 }
 
 void FirmwareUpdater::CheckForUpdate()
@@ -106,7 +138,7 @@ void FirmwareUpdater::CheckForUpdate()
     http.setConnectTimeout(HTTP_TIMEOUT_MS);
 
     if (!http.begin(client, MANIFEST_URL)) {
-        SetLastError("could not open manifest connection");
+        SetStatus(Status::Failed, "could not open manifest connection");
         return;
     }
 
@@ -114,13 +146,13 @@ void FirmwareUpdater::CheckForUpdate()
     if (status != HTTP_CODE_OK) {
         // A 404 here is the normal state of a repo that has no releases yet, so
         // this is a warning rather than an error.
-        SetLastError("manifest fetch returned HTTP " + String(status));
+        SetStatus(Status::Failed, "manifest fetch returned HTTP " + String(status));
         http.end();
         return;
     }
 
     if (http.getSize() > MANIFEST_MAX_BYTES) {
-        SetLastError("manifest is implausibly large (" + String(http.getSize()) + " bytes)");
+        SetStatus(Status::Failed, "manifest is implausibly large (" + String(http.getSize()) + " bytes)");
         http.end();
         return;
     }
@@ -131,7 +163,7 @@ void FirmwareUpdater::CheckForUpdate()
     JsonDocument doc;
     const DeserializationError error = deserializeJson(doc, payload);
     if (error) {
-        SetLastError(String("manifest parse failed: ") + error.c_str());
+        SetStatus(Status::Failed, String("manifest parse failed: ") + error.c_str());
         return;
     }
 
@@ -143,14 +175,15 @@ void FirmwareUpdater::CheckForUpdate()
     const Version current = ParseVersion(FIRMWARE_VERSION);
     const Version offered = ParseVersion(offeredVersion);
     if (!offered.valid) {
-        SetLastError("manifest has no usable version field");
+        SetStatus(Status::Failed, "manifest has no usable version field");
         return;
     }
 
     if (!IsNewer(offered, current)) {
         Serial.printf("[OTA] Up to date (running %s, latest %s)\n",
                       FIRMWARE_VERSION, offeredVersion.c_str());
-        SetLastError("");
+        SetStatus(Status::UpToDate,
+                  "Up to date - " FIRMWARE_VERSION " is the latest release");
         return;
     }
 
@@ -160,7 +193,7 @@ void FirmwareUpdater::CheckForUpdate()
     // build is a hard stop rather than something to guess around.
     JsonVariant build = doc["builds"][FIRMWARE_BUILD];
     if (!build.is<JsonObject>()) {
-        SetLastError("release " + offeredVersion + " has no build for " + FIRMWARE_BUILD);
+        SetStatus(Status::Failed, "release " + offeredVersion + " has no build for " + FIRMWARE_BUILD);
         return;
     }
 
@@ -172,7 +205,7 @@ void FirmwareUpdater::CheckForUpdate()
     release.size = build["size"] | 0U;
 
     if (release.url.isEmpty() || release.md5.isEmpty()) {
-        SetLastError("build entry is missing url or md5");
+        SetStatus(Status::Failed, "build entry is missing url or md5");
         return;
     }
 
@@ -180,7 +213,7 @@ void FirmwareUpdater::CheckForUpdate()
     // worth insisting on: it is what makes a truncated or corrupted download
     // fail before it can be marked bootable.
     if (release.md5.length() != 32) {
-        SetLastError("build entry md5 is not a 32-character digest");
+        SetStatus(Status::Failed, "build entry md5 is not a 32-character digest");
         return;
     }
 
@@ -190,22 +223,53 @@ void FirmwareUpdater::CheckForUpdate()
     // roots cover. Refuse anything that would drop to plain HTTP or leave.
     if (!release.url.startsWith("https://github.com/") &&
         !release.url.startsWith("https://objects.githubusercontent.com/")) {
-        SetLastError("refusing firmware url outside GitHub: " + release.url);
+        SetStatus(Status::Failed, "refusing firmware url outside GitHub: " + release.url);
         return;
     }
 
     if (xSemaphoreTake(stateMutex, portMAX_DELAY) == pdTRUE) {
         pendingRelease = release;
-        lastError = "";
         xSemaphoreGive(stateMutex);
     }
-    updatePending.store(true);
+
+    updateAvailable.store(true);
+
+    // Status before the flag: the render loop starts installing the moment it
+    // sees updatePending, so setting it second means the page can never poll a
+    // download that has not been announced.
+    AnnouncePendingRelease();
+    if (autoInstall.load())
+        updatePending.store(true);
 
     Serial.printf("[OTA] Update available: %s -> %s (%u bytes)\n",
                   FIRMWARE_VERSION, release.version.c_str(),
                   static_cast<unsigned>(release.size));
     if (!release.notes.isEmpty())
         Serial.printf("[OTA] %s\n", release.notes.c_str());
+}
+
+void FirmwareUpdater::AnnouncePendingRelease()
+{
+    const String version = PendingRelease().version;
+    SetStatus(Status::UpdateFound,
+              autoInstall.load()
+                  ? "Version " + version + " found - installing now"
+                  : "Version " + version + " is ready to install");
+}
+
+bool FirmwareUpdater::RequestInstallNow()
+{
+    if (!updateAvailable.load())
+        return false;
+
+    const String version = PendingRelease().version;
+    Serial.printf("[OTA] Install of %s confirmed from the configuration page\n", version.c_str());
+
+    // Same ordering as the automatic path: announce first, because the render
+    // loop acts on updatePending as soon as it is set.
+    SetStatus(Status::UpdateFound, "Installing " + version);
+    updatePending.store(true);
+    return true;
 }
 
 FirmwareUpdater::Release FirmwareUpdater::PendingRelease() const
@@ -237,13 +301,13 @@ bool FirmwareUpdater::Install(const Release& release, const ProgressCallback& on
     // directly lets the digest from the manifest be the thing that decides
     // whether the image is allowed to boot.
     if (!http.begin(client, release.url)) {
-        SetLastError("could not open firmware connection");
+        SetStatus(Status::Failed, "could not open firmware connection");
         return Abandon();
     }
 
     const int status = http.GET();
     if (status != HTTP_CODE_OK) {
-        SetLastError("firmware download returned HTTP " + String(status));
+        SetStatus(Status::Failed, "firmware download returned HTTP " + String(status));
         http.end();
         return Abandon();
     }
@@ -251,7 +315,7 @@ bool FirmwareUpdater::Install(const Release& release, const ProgressCallback& on
     const int reported = http.getSize();
     size_t total = reported > 0 ? static_cast<size_t>(reported) : release.size;
     if (total == 0) {
-        SetLastError("firmware download has no length");
+        SetStatus(Status::Failed, "firmware download has no length");
         http.end();
         return Abandon();
     }
@@ -259,7 +323,7 @@ bool FirmwareUpdater::Install(const Release& release, const ProgressCallback& on
     // A disagreement between the manifest and the asset means the release was
     // assembled wrongly. Refuse rather than trust one over the other.
     if (reported > 0 && release.size > 0 && static_cast<size_t>(reported) != release.size) {
-        SetLastError("size mismatch: manifest says " + String(release.size) +
+        SetStatus(Status::Failed, "size mismatch: manifest says " + String(release.size) +
                      ", server sent " + String(reported));
         http.end();
         return Abandon();
@@ -267,14 +331,14 @@ bool FirmwareUpdater::Install(const Release& release, const ProgressCallback& on
 
     // Picks the OTA slot that is not currently executing.
     if (!Update.begin(total, U_FLASH)) {
-        SetLastError(String("cannot start update: ") + Update.errorString());
+        SetStatus(Status::Failed, String("cannot start update: ") + Update.errorString());
         http.end();
         return Abandon();
     }
 
     // Checked by Update.end(). Until it passes, the boot slot is not switched.
     if (!Update.setMD5(release.md5.c_str())) {
-        SetLastError("rejected md5 " + release.md5);
+        SetStatus(Status::Failed, "rejected md5 " + release.md5);
         Update.abort();
         http.end();
         return Abandon();
@@ -284,13 +348,20 @@ bool FirmwareUpdater::Install(const Release& release, const ProgressCallback& on
     uint8_t buffer[DOWNLOAD_CHUNK_BYTES];
     size_t written = 0;
     unsigned long lastProgressAt = millis();
+    bool recordedFailure = false;
+
+    // The web server keeps answering while this runs -- it lives on its own
+    // task -- so anyone watching the configuration page sees the download move.
+    int lastReportedPercent = -1;
+    SetStatus(Status::Downloading, "Downloading " + release.version);
 
     while (written < total) {
         // Checked first thing every pass, so that any way of making no progress
         // -- no bytes available, or a socket that keeps returning zero from a
         // read -- ends the loop instead of spinning here forever.
         if (millis() - lastProgressAt > DOWNLOAD_STALL_TIMEOUT_MS) {
-            SetLastError("download stalled after " + String(written) + " bytes");
+            SetStatus(Status::Failed, "download stalled after " + String(written) + " bytes");
+            recordedFailure = true;
             break;
         }
 
@@ -316,7 +387,8 @@ bool FirmwareUpdater::Install(const Release& release, const ProgressCallback& on
         }
 
         if (Update.write(buffer, read) != read) {
-            SetLastError(String("flash write failed: ") + Update.errorString());
+            SetStatus(Status::Failed, String("flash write failed: ") + Update.errorString());
+            recordedFailure = true;
             break;
         }
 
@@ -324,25 +396,34 @@ bool FirmwareUpdater::Install(const Release& release, const ProgressCallback& on
         lastProgressAt = millis();
         if (onProgress)
             onProgress(written, total);
+
+        // Every five percent rather than every chunk: this loop runs hundreds of
+        // times a second and each update takes the state mutex.
+        const int percent = static_cast<int>((written * 100) / total);
+        if (percent >= lastReportedPercent + 5) {
+            lastReportedPercent = percent;
+            SetStatus(Status::Downloading,
+                      "Downloading " + release.version + " - " + String(percent) + " percent");
+        }
     }
 
     http.end();
 
     if (written != total) {
-        if (LastError().isEmpty())
-            SetLastError("download truncated at " + String(written) + " of " + String(total));
+        if (!recordedFailure)
+            SetStatus(Status::Failed, "download truncated at " + String(written) + " of " + String(total));
         Update.abort();
         return Abandon();
     }
 
     // Verifies the MD5 and, only then, points otadata at the new slot.
     if (!Update.end()) {
-        SetLastError(String("verification failed: ") + Update.errorString());
+        SetStatus(Status::Failed, String("verification failed: ") + Update.errorString());
         return Abandon();
     }
 
     Serial.printf("[OTA] %s written and verified\n", release.version.c_str());
-    SetLastError("");
+    SetStatus(Status::Installed, "Installed " + release.version + " - restarting");
     return true;
 }
 
@@ -354,28 +435,49 @@ bool FirmwareUpdater::Abandon()
     // loop from retrying the same broken download on the very next frame --
     // the hourly check will offer the release again.
     updatePending.store(false);
+    updateAvailable.store(false);
     return false;
 }
 
-void FirmwareUpdater::SetLastError(const String& message)
+void FirmwareUpdater::SetStatus(Status newStatus, const String& message)
 {
-    if (!message.isEmpty())
+    if (newStatus == Status::Failed)
         Serial.printf("[OTA] %s\n", message.c_str());
 
     if (stateMutex != nullptr && xSemaphoreTake(stateMutex, portMAX_DELAY) == pdTRUE) {
-        lastError = message;
+        status = newStatus;
+        statusMessage = message;
         xSemaphoreGive(stateMutex);
     }
 }
 
-String FirmwareUpdater::LastError() const
+FirmwareUpdater::StatusSnapshot FirmwareUpdater::CurrentStatus() const
 {
-    String copy;
+    StatusSnapshot snapshot;
     if (stateMutex != nullptr && xSemaphoreTake(stateMutex, portMAX_DELAY) == pdTRUE) {
-        copy = lastError;
+        snapshot.status = status;
+        snapshot.message = statusMessage;
         xSemaphoreGive(stateMutex);
     }
-    return copy;
+
+    // Derived rather than stored, so it cannot disagree with the flags the
+    // render loop and the checker task actually act on.
+    snapshot.awaitingConfirmation = AwaitingConfirmation();
+    return snapshot;
+}
+
+const char* FirmwareUpdater::StatusName(Status status)
+{
+    switch (status) {
+        case Status::Checking:    return "checking";
+        case Status::UpToDate:    return "up-to-date";
+        case Status::UpdateFound: return "update-found";
+        case Status::Downloading: return "downloading";
+        case Status::Installed:   return "installed";
+        case Status::Failed:      return "failed";
+        case Status::Idle:
+        default:                  return "idle";
+    }
 }
 
 FirmwareUpdater::Version FirmwareUpdater::ParseVersion(const String& raw)

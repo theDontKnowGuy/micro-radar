@@ -1,17 +1,17 @@
 {
-  "version": "1.1.0",
-  "notes": "OTA support",
+  "version": "1.1.2",
+  "notes": "Adds automatic over-the-air updates from GitHub.",
   "released": "2026-08-05",
   "builds": {
     "esp32-s3-gc9b72": {
-      "url": "https://github.com/thedontknowguy/micro-radar/releases/download/v1.1.0/micro-radar-esp32-s3-gc9b72-1.1.0.bin",
-      "md5": "7590ea9aa6382341ba0e1bc822822b0b",
-      "size": 1317632
+      "url": "https://github.com/thedontknowguy/micro-radar/releases/download/v1.1.2/micro-radar-esp32-s3-gc9b72-1.1.2.bin",
+      "md5": "670eda34f61e0345e73976ab06a676f3",
+      "size": 1318816
     },
     "esp32-s3-devkitm-1": {
-      "url": "https://github.com/thedontknowguy/micro-radar/releases/download/v1.1.0/micro-radar-esp32-s3-devkitm-1-1.1.0.bin",
-      "md5": "4030d26359e46a363929422fcbac7ddb",
-      "size": 1285264
+      "url": "https://github.com/thedontknowguy/micro-radar/releases/download/v1.1.2/micro-radar-esp32-s3-devkitm-1-1.1.2.bin",
+      "md5": "dff4a7b5f41d50a1b7773373e3928b60",
+      "size": 1286464
     }
   }
 }

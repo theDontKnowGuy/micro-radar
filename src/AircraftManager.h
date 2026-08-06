@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <freertos/task.h>
@@ -103,6 +104,10 @@ private:
     std::vector<LabelLayoutResult> completedLabelLayout;
     bool labelLayoutReady = false;
 
+    // Written by the render loop, read by the label-layout worker as well as by
+    // the draw pass, so it is atomic rather than a plain bool.
+    std::atomic<bool> updateNoticeVisible{false};
+
     ConfigurationWebServer& configServer;
     OpenSkyAuthTokenHandler& authHandler;
     HttpRequestManager& http;
@@ -117,6 +122,7 @@ private:
     void DrawLabelLeader(LGFX_Sprite& backbuffer, const RenderAircraft& aircraft) const;
     void DrawWindInfo(LGFX_Sprite& backbuffer) const;
     void DrawLocationInfo(LGFX_Sprite& backbuffer) const;
+    void DrawUpdateNotice(LGFX_Sprite& backbuffer) const;
     void DrawAircraftRadarVector(LGFX_Sprite& backbuffer, int x, int y, const TrackedAircraft& tracked) const;
     void DrawAircraftTriangle(LGFX_Sprite& backbuffer, int x, int y, const TrackedAircraft& tracked) const;
     void ResolveNextDestination();
@@ -146,6 +152,11 @@ public:
     // because the only paths out of an install are a reboot or a failure that
     // is followed by one.
     void SuspendNetworkTask();
+
+    // Puts a small "Update avail." line above the location name, for the
+    // manual-update mode where a found release waits for the owner. Cheap
+    // enough to set every frame; aircraft labels route around it once set.
+    void ShowUpdateNotice(bool visible) { updateNoticeVisible.store(visible); }
 
     void Draw(
         LGFX_Sprite& backbuffer,

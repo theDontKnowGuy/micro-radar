@@ -1,8 +1,8 @@
 #include <Arduino.h>
-#include <WiFiManager.h>
+#include <WiFi.h>
+#include <esp_wifi.h>
 
 #include "LGFX.h"
-#include "WiFiManagerHelpers.h"
 #include "ConfigurationWebServer.h"
 #include "HttpRequestManager.h"
 #include "OpenSkyAuthTokenHandler.h"
@@ -16,10 +16,25 @@
 const char* preconfiguredWifiSsid = "";
 const char* preconfiguredWifiPassword = "";
 
+// The access point the radar puts up when it has no network to join. The
+// configuration page is served over it, so setup and configuration are the same
+// page rather than two.
+constexpr const char* SetupHotspotName = "MicroRadar-Setup";
+
+// How long to wait for a join before giving up on it. The Arduino core's own
+// default is a silent 60s per attempt with no way out, which is long enough
+// that a mistyped password looks like a hang.
+constexpr unsigned long WifiConnectTimeoutMs = 20000;
+
+// A router that is still coming back up after a power cut answers the second
+// attempt when it did not answer the first. Two is enough to ride that out
+// without leaving a radar with a genuinely wrong password sitting on a blank
+// screen for a minute.
+constexpr int WifiConnectAttempts = 2;
+
 LGFX tft;
 LGFX_Sprite backbuffer(&tft);
 
-WiFiManager wm;
 ConfigurationWebServer configServer;
 HttpRequestManager http;
 OpenSkyAuthTokenHandler authHandler(http);
@@ -39,6 +54,98 @@ void SecureWipe(void* data, size_t length)
   volatile uint8_t* bytes = static_cast<volatile uint8_t*>(data);
   while (length-- > 0)
     *bytes++ = 0;
+}
+
+// Centres up to four lines of status text on an otherwise blank panel. Every
+// screen the radar shows before it starts sweeping looks like this.
+void ShowStatusScreen(const String& first,
+                      const String& second = "",
+                      const String& third = "",
+                      const String& fourth = "")
+{
+  const String lines[] = { first, second, third, fourth };
+  int count = 0;
+  for (const String& line : lines)
+    count += line.isEmpty() ? 0 : 1;
+
+  tft.fillScreen(lgfx::color888(0, 0, 0));
+  tft.setTextColor(lgfx::color888(0, 255, 0));
+
+  const int lineHeight = tft.fontHeight() + 10;
+  int y = SCREEN_SIZE_DIV_2 - ((count - 1) * lineHeight) / 2;
+  for (const String& line : lines) {
+    if (line.isEmpty())
+      continue;
+    tft.drawCentreString(line, SCREEN_SIZE_DIV_2, y);
+    y += lineHeight;
+  }
+}
+
+// Firmware before the merged configuration page used WiFiManager, which left
+// the credentials in the Wi-Fi driver's own NVS entry rather than in this
+// firmware's settings. Without this, every radar updated over the air would
+// come back up in setup mode and have to be re-entered by hand. Runs once: the
+// import is recorded, so a network forgotten from the page stays forgotten.
+void ImportStoredWiFiCredentials(String& ssid, String& password)
+{
+  if (configServer.GetStoredString("wifi-imported") == "true")
+    return;
+
+  wifi_config_t config = {};
+  if (esp_wifi_get_config(WIFI_IF_STA, &config) == ESP_OK && config.sta.ssid[0] != '\0') {
+    char buffer[sizeof(config.sta.password) + 1] = {};
+
+    memcpy(buffer, config.sta.ssid, sizeof(config.sta.ssid));
+    buffer[sizeof(config.sta.ssid)] = '\0';
+    ssid = buffer;
+
+    memcpy(buffer, config.sta.password, sizeof(config.sta.password));
+    buffer[sizeof(config.sta.password)] = '\0';
+    password = buffer;
+
+    SecureWipe(buffer, sizeof(buffer));
+    Serial.printf("Imported Wi-Fi credentials for %s from the previous firmware\n", ssid.c_str());
+  }
+
+  configServer.SaveWiFiCredentials(ssid, password);
+}
+
+// No network to join: become one. The same configuration page is served over
+// the radar's own access point, so the network, the radar centre, the OpenSky
+// credentials and everything else are all set in a single submission -- which
+// is what the reboot at the end of this is for.
+[[noreturn]] void RunSetupPortal()
+{
+  Serial.println("No Wi-Fi connection - starting setup hotspot");
+
+  // AP_STA rather than AP: the page's network list needs the station interface
+  // to run a scan, which is not available with the access point alone.
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.softAP(SetupHotspotName);
+  configServer.Initialise(firmwareUpdater, ConfigurationWebServer::Mode::Setup);
+
+  ShowStatusScreen("- SETUP -",
+                   "Connect to this WiFi hotspot:",
+                   SetupHotspotName,
+                   "then open " + WiFi.softAPIP().toString());
+
+  // Blocking on purpose. Nothing else can usefully run without a network, and
+  // loop() is never reached in this mode -- the only way out is the reboot
+  // below, once the page has been saved. The captive-portal DNS is polled here
+  // because DNSServer has no asynchronous mode of its own.
+  while (!configServer.RestartRequested()) {
+    configServer.PumpCaptivePortal();
+    delay(2);
+  }
+
+  Serial.println("Setup saved - restarting");
+  ShowStatusScreen("Settings saved", "Restarting");
+  delay(1500);   // let the HTTP response finish going out
+  tft.waitDMA(); // make sure the panel bus is idle -- see loop()
+  ESP.restart();
+
+  while (true)
+    delay(1000); // ESP.restart() does not return, but it is not declared that way
 }
 
 void ShowBootLogo()
@@ -168,61 +275,68 @@ void setup()
   }
 
   // establish WiFi connection
-  tft.fillScreen(lgfx::color888(0, 0, 0));
-  tft.setTextColor(lgfx::color888(0, 255, 0));
-  tft.drawCentreString("Connecting to WiFi...", SCREEN_SIZE / 2, SCREEN_SIZE / 2);
+  ShowStatusScreen("Connecting to WiFi...");
 
-  WiFiManagerHelpers::ConfigureWiFiManager(wm, tft);
+  WiFi.mode(WIFI_STA);
+
+  // The stored network decides which mode the page is served in, so the
+  // settings have to be readable before that decision is made.
+  configServer.PrepareStorage();
+
+  String ssid = configServer.GetStoredString("wifi-ssid");
+  String password = configServer.GetStoredString("wifi-pass");
 
   if (strlen(preconfiguredWifiSsid) > 0) {
-    WiFi.begin(preconfiguredWifiSsid, preconfiguredWifiPassword);
-    WiFi.waitForConnectResult();
+    ssid = preconfiguredWifiSsid;
+    password = preconfiguredWifiPassword;
+  }
+  else if (ssid.isEmpty()) {
+    ImportStoredWiFiCredentials(ssid, password);
   }
 
-  wm.autoConnect(WiFiManagerHelpers::WiFiManagerName);
+  bool connected = false;
+  for (int attempt = 0; !connected && !ssid.isEmpty() && attempt < WifiConnectAttempts; ++attempt) {
+    if (attempt > 0)
+      ShowStatusScreen("Connecting to WiFi...", ssid, "Retrying");
+
+    WiFi.begin(ssid.c_str(), password.c_str());
+    connected = WiFi.waitForConnectResult(WifiConnectTimeoutMs) == WL_CONNECTED;
+    if (!connected)
+      WiFi.disconnect();
+  }
+
+  // Nothing stored, or the stored network would not have us. Either way the
+  // radar has no way to be configured except by serving the page itself; this
+  // does not return.
+  if (!connected)
+    RunSetupPortal();
 
   // begin background server for configuration
-  configServer.Initialise();
+  configServer.Initialise(firmwareUpdater, ConfigurationWebServer::Mode::Station);
 
-  if (WiFi.status() == WL_CONNECTED) {
-    const String configurationUrl = String("http://") + WiFi.localIP().toString();
-    Serial.print("Configure me at ");
-    Serial.println(configurationUrl);
+  const String configurationUrl = String("http://") + WiFi.localIP().toString();
+  Serial.print("Configure me at ");
+  Serial.println(configurationUrl);
 
-    tft.fillScreen(lgfx::color888(0, 0, 0));
-    tft.setTextColor(lgfx::color888(0, 255, 0));
-    const int lineHeight = tft.fontHeight() + 10;
-    tft.drawCentreString(
-      "Configure me at",
-      SCREEN_SIZE / 2,
-      SCREEN_SIZE / 2 - lineHeight
-    );
-    tft.drawCentreString(
-      configurationUrl,
-      SCREEN_SIZE / 2,
-      SCREEN_SIZE / 2
-    );
+  // Once the radar starts updating itself the version on screen is the only way
+  // to tell, at a glance, which build a given unit ended up on. Kept to the bare
+  // number here -- the release date and description are on the configuration
+  // page, where there is room for them.
+  ShowStatusScreen("Configure me at", configurationUrl, "v" FIRMWARE_VERSION);
 
-    // Once the radar starts updating itself the version on screen is the only
-    // way to tell, at a glance, which build a given unit ended up on. Kept to
-    // the bare number here -- the release date and description are on the
-    // configuration page, where there is room for them.
-    tft.drawCentreString(
-      "v" FIRMWARE_VERSION,
-      SCREEN_SIZE / 2,
-      SCREEN_SIZE / 2 + lineHeight
-    );
-
-    // Keep the address visible long enough to read while the asynchronous
-    // configuration server is already available.
-    delay(4000);
-  }
+  // Keep the address visible long enough to read while the asynchronous
+  // configuration server is already available.
+  delay(4000);
 
   // initialise aircraft manager
   aircraftManager.Initialise();
 
   // Start polling GitHub for new firmware. Needs Wi-Fi, so it goes after
   // autoConnect; the checker delays its first look by a couple of minutes.
+  // Whether a find installs itself or waits for the owner is read here rather
+  // than per check -- saving the setting reboots the radar anyway.
+  const String autoUpdateSetting = configServer.GetStoredString("auto-update");
+  firmwareUpdater.SetAutoInstall(autoUpdateSetting != "false");
   firmwareUpdater.Initialise();
 
   // Read display configuration once. Reading Preferences in every frame
@@ -253,6 +367,11 @@ void loop()
     RunFirmwareUpdate();
     return;
   }
+
+  // "Ask me first" only asks if something says so where the radar is actually
+  // being looked at, which for most units is the panel rather than the
+  // configuration page. Three atomic loads, so it can just track the flag.
+  aircraftManager.ShowUpdateNotice(firmwareUpdater.AwaitingConfirmation());
 
   aircraftManager.Update();
 

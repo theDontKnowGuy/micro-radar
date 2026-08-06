@@ -20,6 +20,18 @@
 # Changing the partition table erases NVS, so Wi-Fi credentials and all settings
 # saved through the web UI are lost the first time you flash this over serial.
 # They survive every subsequent OTA, because OTA only rewrites an app slot.
+#
+# Moving to this table also relocates the coredump partition from 0x3F0000 to
+# 0x7F0000, which under huge_app.csv was past the end of the table and still
+# holds whatever was flashed there before. The core dump component reads that
+# stale data as a length and complains once per boot:
+#
+#   E (253) esp_core_dump_flash: Incorrect size of core dump image: 1819042143
+#
+# Harmless -- it only means "no valid core dump here" -- but to silence it,
+# erase the region once (an *erased* partition is skipped without logging):
+#
+#   esptool.py --chip esp32s3 --port <port> erase_region 0x7F0000 0x10000
 
 # Name,     Type, SubType, Offset,   Size,     Flags
 nvs,        data, nvs,     0x9000,   0x5000,

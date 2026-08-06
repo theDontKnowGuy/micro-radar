@@ -14,6 +14,13 @@ constexpr int LOCATION_LABEL_WIDTH = 108;
 constexpr int LOCATION_LABEL_HEIGHT = 11;
 constexpr int LOCATION_LABEL_X = (SCREEN_SIZE - LOCATION_LABEL_WIDTH) / 2;
 constexpr int LOCATION_LABEL_Y = SCREEN_SIZE - WIND_LABEL_Y - LOCATION_LABEL_HEIGHT;
+// Shown only while a firmware release is waiting for the owner to confirm it.
+// Sits above the location name rather than below: both panels are round, so the
+// rows past the location label fall outside the visible circle.
+constexpr int UPDATE_LABEL_WIDTH = 84;
+constexpr int UPDATE_LABEL_HEIGHT = 11;
+constexpr int UPDATE_LABEL_X = (SCREEN_SIZE - UPDATE_LABEL_WIDTH) / 2;
+constexpr int UPDATE_LABEL_Y = LOCATION_LABEL_Y - UPDATE_LABEL_HEIGHT - 3;
 
 #include <ArduinoJson.h>
 #include <algorithm>
@@ -765,6 +772,7 @@ void AircraftManager::Draw(
 
     DrawWindInfo(backbuffer);
     DrawLocationInfo(backbuffer);
+    DrawUpdateNotice(backbuffer);
 }
 
 void AircraftManager::DrawRadarCircles(LGFX_Sprite& backbuffer) const
@@ -1253,6 +1261,16 @@ void AircraftManager::SolveAircraftLabels(std::vector<RenderAircraft>& aircraft)
             addReservedLabelCost(locationBox);
         }
 
+        if (updateNoticeVisible) {
+            const LabelBox updateBox = {
+                UPDATE_LABEL_X,
+                UPDATE_LABEL_Y,
+                UPDATE_LABEL_WIDTH,
+                UPDATE_LABEL_HEIGHT
+            };
+            addReservedLabelCost(updateBox);
+        }
+
         for (size_t otherIndex = 0; otherIndex < aircraft.size(); ++otherIndex) {
             if (otherIndex == index)
                 continue;
@@ -1539,6 +1557,24 @@ void AircraftManager::DrawLocationInfo(LGFX_Sprite& backbuffer) const
         locationNameLabel,
         SCREEN_SIZE_DIV_2,
         LOCATION_LABEL_Y
+    );
+}
+
+void AircraftManager::DrawUpdateNotice(LGFX_Sprite& backbuffer) const
+{
+    if (!updateNoticeVisible)
+        return;
+
+    // Amber rather than the display's green: this is the one thing on screen
+    // that is asking for a decision, and it should not read as radar data.
+    // Kept to two words because the label has to fit inside the circle without
+    // crowding the location name under it.
+    backbuffer.setTextSize(1);
+    backbuffer.setTextColor(lgfx::color888(220, 150, 0));
+    backbuffer.drawCentreString(
+        "Update avail.",
+        SCREEN_SIZE_DIV_2,
+        UPDATE_LABEL_Y
     );
 }
 

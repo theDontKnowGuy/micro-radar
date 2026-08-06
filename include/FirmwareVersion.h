@@ -9,7 +9,7 @@
 //
 // Format is MAJOR.MINOR.PATCH. FirmwareUpdater compares the three components
 // numerically rather than as text, so 1.10.0 correctly sorts above 1.9.0.
-#define FIRMWARE_VERSION "1.1.2"
+#define FIRMWARE_VERSION "1.3.0"
 
 // When this version was published, and what changed in it. Both are shown on
 // the configuration page so the running firmware can describe itself, which
@@ -22,8 +22,8 @@
 //
 // Keep the date as YYYY-MM-DD and the notes to a sentence -- the notes are
 // rendered on a phone-width page.
-#define FIRMWARE_RELEASED "2026-08-05"
-#define FIRMWARE_NOTES "Adds automatic over-the-air updates from GitHub."
+#define FIRMWARE_RELEASED "2026-08-06"
+#define FIRMWARE_NOTES "New built-in Wi-Fi setup portal, OpenSky sign-up help, and a choice of automatic or confirmed firmware updates."
 
 // Identifies which hardware build this binary is for. Set per environment in
 // platformio.ini and used as the key into the manifest's "builds" object, so
