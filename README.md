@@ -204,7 +204,7 @@ when a check finds a newer release:
 - **Install automatically** (default) — the radar downloads and installs it the
   moment it finds it, then reboots. Unattended units stay current on their own.
 - **Ask me first** — the radar records the release and stops there. A small
-  amber `Update avail.` line appears above the location name on the radar
+  amber `Update available` line appears above the location name on the radar
   itself, and the configuration page offers an **Install now** button next to
   the version footer, with the status reading `Version 1.2.0 is ready to
   install`. Both persist for as long as the radar stays up, so one that found

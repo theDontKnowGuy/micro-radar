@@ -153,7 +153,7 @@ public:
     // is followed by one.
     void SuspendNetworkTask();
 
-    // Puts a small "Update avail." line above the location name, for the
+    // Puts a small "Update available" line above the location name, for the
     // manual-update mode where a found release waits for the owner. Cheap
     // enough to set every frame; aircraft labels route around it once set.
     void ShowUpdateNotice(bool visible) { updateNoticeVisible.store(visible); }
