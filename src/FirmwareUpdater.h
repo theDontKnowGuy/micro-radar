@@ -111,6 +111,10 @@ public:
     // does not restart the chip itself, so the panel can be brought to a safe
     // state first.
     //
+    // If the Arduino Update library manages the MD5 but cannot activate the
+    // slot, the image is checked once more through the memory-mapped read path
+    // and the boot slot is moved by hand -- see ActivateSlotVerifiedByMapping().
+    //
     // Must be called from the render loop, not from a background task.
     bool Install(const Release& release, const ProgressCallback& onProgress);
 
@@ -144,6 +148,28 @@ private:
 
     // Common exit for every failure path in Install(). Always returns false.
     bool Abandon();
+
+    // Last resort when Update.end() reports UPDATE_ERROR_ACTIVATE.
+    //
+    // That error means the MD5 matched -- Update checks the digest before it
+    // tries to activate anything -- and that esp_ota_set_boot_partition()
+    // refused. It refuses by re-reading the freshly written slot through
+    // esp_flash_read() and hashing it, and at least one unit in the field has a
+    // flash chip that returns the first 32 bytes of any longer read and then
+    // repeats them. On that board the hash is garbage while the image itself is
+    // byte-perfect, so a good release can never be activated.
+    //
+    // This repeats the same verification the API would have done, reading
+    // through spi_flash_mmap instead: the cache path, which reads correctly on
+    // that unit and is what the bootloader itself will use at the next boot.
+    // Only if the image passes its own appended SHA-256 is otadata rewritten by
+    // hand to point at the slot.
+    //
+    // Nothing here weakens the chain. The manifest MD5 has already matched, the
+    // image is checked against the digest the build baked into it, and the
+    // bootloader verifies it independently before running it -- so a genuinely
+    // corrupt image still cannot boot. Returns false on any doubt.
+    bool ActivateSlotVerifiedByMapping();
 
     // Reports the release currently held in pendingRelease, wording it for
     // whichever mode is in force.

@@ -6,6 +6,11 @@
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <algorithm>
+#include <esp_ota_ops.h>
+#include <esp_partition.h>
+#include <esp_rom_crc.h>
+#include <esp_spi_flash.h>
+#include <mbedtls/sha256.h>
 
 #include "FirmwareVersion.h"
 #include "UpdateRootCAs.h"
@@ -43,6 +48,206 @@ constexpr size_t DOWNLOAD_CHUNK_BYTES = 2048;
 
 // TLS plus JSON on one stack. The handshake is the expensive part.
 constexpr uint32_t CHECK_TASK_STACK = 12288;
+
+// Everything below here exists only for ActivateSlotVerifiedByMapping(). It all
+// reads flash through spi_flash_mmap rather than esp_partition_read, because the
+// whole point is to avoid the driver read path that fails on some units.
+
+// The MMU maps flash in 64K pages, so a mapping has to start on one.
+constexpr uint32_t MMAP_PAGE = 0x10000;
+
+constexpr uint8_t IMAGE_MAGIC = 0xE9;
+constexpr size_t IMAGE_HEADER_BYTES = 24;
+constexpr size_t SEGMENT_HEADER_BYTES = 8;
+constexpr size_t IMAGE_DIGEST_BYTES = 32;
+
+// otadata holds two of these, one per 4K sector. The layout is fixed by the
+// bootloader, so it is spelled out here rather than pulled from a private
+// header. The bootloader picks whichever entry has the highest sequence number
+// with a matching CRC, and boots slot (seq - 1) % <number of app slots>.
+struct OtaSelectEntry {
+    uint32_t seq;
+    uint8_t label[20];
+    uint32_t state;
+    uint32_t crc;
+};
+static_assert(sizeof(OtaSelectEntry) == 32, "otadata entry must stay 32 bytes");
+
+// partitions_ota.csv declares exactly two app slots.
+constexpr uint32_t APP_SLOT_COUNT = 2;
+
+uint32_t OtaSeqCrc(uint32_t seq)
+{
+    return esp_rom_crc32_le(UINT32_MAX, reinterpret_cast<const uint8_t*>(&seq), sizeof seq);
+}
+
+// Reads through the cache. Maps the 64K page the address falls in, copies out,
+// unmaps again -- callers stay well under a page per call.
+bool ReadMapped(uint32_t address, void* destination, size_t length)
+{
+    const uint32_t base = address & ~(MMAP_PAGE - 1);
+    const uint32_t offsetInPage = address - base;
+
+    const void* mapped = nullptr;
+    spi_flash_mmap_handle_t handle = 0;
+    if (spi_flash_mmap(base, offsetInPage + length, SPI_FLASH_MMAP_DATA, &mapped, &handle) != ESP_OK)
+        return false;
+
+    memcpy(destination, static_cast<const uint8_t*>(mapped) + offsetInPage, length);
+    spi_flash_munmap(handle);
+    return true;
+}
+
+// Walks the segment table the way the bootloader does, to find where the image
+// ends and its appended digest begins. Returns 0 for anything that does not
+// parse as an image carrying a digest.
+size_t MappedImageLength(uint32_t base, uint32_t slotSize)
+{
+    uint8_t header[IMAGE_HEADER_BYTES];
+    if (!ReadMapped(base, header, sizeof header))
+        return 0;
+    if (header[0] != IMAGE_MAGIC)
+        return 0;
+
+    // Byte 23 is the hash_appended flag. Without it there is nothing to check
+    // the image against, and this path refuses to guess.
+    if (header[23] != 1)
+        return 0;
+
+    const uint8_t segments = header[1];
+    size_t offset = IMAGE_HEADER_BYTES;
+
+    for (uint8_t i = 0; i < segments; i++) {
+        uint8_t segmentHeader[SEGMENT_HEADER_BYTES];
+        if (!ReadMapped(base + offset, segmentHeader, sizeof segmentHeader))
+            return 0;
+
+        uint32_t segmentLength = 0;
+        memcpy(&segmentLength, segmentHeader + 4, sizeof segmentLength);
+
+        offset += SEGMENT_HEADER_BYTES + segmentLength;
+
+        // A corrupt segment header would otherwise walk off the end of the slot
+        // and take the mapping calls with it.
+        if (offset > slotSize)
+            return 0;
+    }
+
+    // One checksum byte, padded out to the next 16-byte boundary, then the
+    // digest.
+    offset = (offset + 1 + 15) & ~static_cast<size_t>(15);
+    return offset + IMAGE_DIGEST_BYTES;
+}
+
+// Hashes everything ahead of the digest and compares. This is the same test
+// esp_image_verify() performs; only the way the bytes are read differs.
+bool MappedDigestMatches(uint32_t base, size_t imageLength)
+{
+    const size_t hashedLength = imageLength - IMAGE_DIGEST_BYTES;
+
+    uint8_t expected[IMAGE_DIGEST_BYTES];
+    if (!ReadMapped(base + hashedLength, expected, sizeof expected))
+        return false;
+
+    // Internal memory: this runs with the network worker suspended, and PSRAM
+    // buys nothing for a buffer this size.
+    constexpr size_t CHUNK = 4096;
+    auto* buffer = static_cast<uint8_t*>(heap_caps_malloc(CHUNK, MALLOC_CAP_INTERNAL));
+    if (buffer == nullptr)
+        return false;
+
+    mbedtls_sha256_context sha;
+    mbedtls_sha256_init(&sha);
+    mbedtls_sha256_starts_ret(&sha, 0);
+
+    bool ok = true;
+    for (size_t at = 0; at < hashedLength;) {
+        const size_t want = std::min(CHUNK, hashedLength - at);
+        if (!ReadMapped(base + at, buffer, want)) {
+            ok = false;
+            break;
+        }
+        mbedtls_sha256_update_ret(&sha, buffer, want);
+        at += want;
+    }
+
+    uint8_t calculated[IMAGE_DIGEST_BYTES];
+    mbedtls_sha256_finish_ret(&sha, calculated);
+    mbedtls_sha256_free(&sha);
+    free(buffer);
+
+    return ok && memcmp(calculated, expected, sizeof calculated) == 0;
+}
+
+// Rewrites otadata so the next boot runs `target`. This is what
+// esp_ota_set_boot_partition() does once it is satisfied with the image; only
+// its verification step is unusable here, not its bookkeeping.
+bool PointBootAt(const esp_partition_t* target)
+{
+    const esp_partition_t* otadata = esp_partition_find_first(
+        ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_OTA, nullptr);
+    if (otadata == nullptr)
+        return false;
+
+    OtaSelectEntry entries[2] = {};
+    for (int sector = 0; sector < 2; sector++) {
+        if (!ReadMapped(otadata->address + sector * SPI_FLASH_SEC_SIZE,
+                        &entries[sector], sizeof entries[sector]))
+            return false;
+    }
+
+    // An erased entry reads as all ones; a torn write shows up as a CRC that no
+    // longer matches. Either way it does not count towards the running maximum.
+    int activeSector = -1;
+    uint32_t highestSeq = 0;
+    for (int sector = 0; sector < 2; sector++) {
+        const OtaSelectEntry& entry = entries[sector];
+        if (entry.seq == UINT32_MAX || OtaSeqCrc(entry.seq) != entry.crc)
+            continue;
+        if (activeSector < 0 || entry.seq > highestSeq) {
+            highestSeq = entry.seq;
+            activeSector = sector;
+        }
+    }
+
+    const uint32_t targetSlot = target->subtype - ESP_PARTITION_SUBTYPE_APP_OTA_0;
+
+    // The sequence number has to both outrank what is there and land on the
+    // wanted slot, so step it until the modulo agrees.
+    uint32_t seq = activeSector < 0 ? 1 : highestSeq + 1;
+    while ((seq - 1) % APP_SLOT_COUNT != targetSlot)
+        seq++;
+
+    // Never overwrite the entry currently being believed: if the erase or the
+    // write is interrupted, the old one is still there to boot from.
+    const int writeSector = activeSector == 0 ? 1 : 0;
+
+    OtaSelectEntry entry = {};
+    entry.seq = seq;
+    memset(entry.label, 0xFF, sizeof entry.label);
+
+    // Same state the API would leave behind. The bootloader promotes it to
+    // pending-verify, and initArduino() confirms it once the new image is
+    // running, so the rollback safety net keeps working.
+    entry.state = ESP_OTA_IMG_NEW;
+    entry.crc = OtaSeqCrc(seq);
+
+    if (esp_partition_erase_range(otadata, writeSector * SPI_FLASH_SEC_SIZE,
+                                  SPI_FLASH_SEC_SIZE) != ESP_OK)
+        return false;
+    if (esp_partition_write(otadata, writeSector * SPI_FLASH_SEC_SIZE,
+                            &entry, sizeof entry) != ESP_OK)
+        return false;
+
+    // Read back through the mapped path -- on the unit this exists for, reading
+    // it back any other way would prove nothing.
+    OtaSelectEntry written = {};
+    if (!ReadMapped(otadata->address + writeSector * SPI_FLASH_SEC_SIZE,
+                    &written, sizeof written))
+        return false;
+
+    return written.seq == seq && written.crc == entry.crc;
+}
 
 }  // namespace
 
@@ -418,12 +623,55 @@ bool FirmwareUpdater::Install(const Release& release, const ProgressCallback& on
 
     // Verifies the MD5 and, only then, points otadata at the new slot.
     if (!Update.end()) {
-        SetStatus(Status::Failed, String("verification failed: ") + Update.errorString());
-        return Abandon();
+        // UPDATE_ERROR_ACTIVATE is the one failure worth a second opinion: the
+        // MD5 has already matched, so the bytes are right, and what refused was
+        // esp_ota_set_boot_partition() re-reading the slot through the flash
+        // driver. Some units cannot be trusted to read that back correctly.
+        if (Update.getError() != UPDATE_ERROR_ACTIVATE || !ActivateSlotVerifiedByMapping()) {
+            SetStatus(Status::Failed, String("verification failed: ") + Update.errorString());
+            return Abandon();
+        }
+
+        Serial.println("[OTA] esp_ota_set_boot_partition rejected an image that verifies "
+                       "through the mapped read path -- this unit's flash driver reads are "
+                       "unreliable; activated by hand");
     }
 
     Serial.printf("[OTA] %s written and verified\n", release.version.c_str());
     SetStatus(Status::Installed, "Installed " + release.version + " - restarting");
+    return true;
+}
+
+bool FirmwareUpdater::ActivateSlotVerifiedByMapping()
+{
+    // The same slot Update.begin() picked, and the same one it just filled.
+    const esp_partition_t* target = esp_ota_get_next_update_partition(nullptr);
+    if (target == nullptr) {
+        Serial.println("[OTA] no inactive slot to activate");
+        return false;
+    }
+
+    const size_t imageLength = MappedImageLength(target->address, target->size);
+    if (imageLength == 0 || imageLength > target->size) {
+        Serial.println("[OTA] written slot does not parse as an image carrying a digest");
+        return false;
+    }
+
+    if (!MappedDigestMatches(target->address, imageLength)) {
+        // The manifest MD5 matched, so this would mean the bytes changed between
+        // being written and being read back. Refuse: the driver is not the only
+        // thing that could be wrong.
+        Serial.println("[OTA] written image fails its own SHA-256 through the mapped path");
+        return false;
+    }
+
+    if (!PointBootAt(target)) {
+        Serial.println("[OTA] could not move otadata to the new slot");
+        return false;
+    }
+
+    Serial.printf("[OTA] %s verified through the mapped path and marked bootable\n",
+                  target->label);
     return true;
 }
 

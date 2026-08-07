@@ -1836,7 +1836,7 @@ void AircraftManager::DrawWindInfo(LGFX_Sprite& backbuffer) const
     // Measured against its top row: this block sits above the centre, so that
     // is the edge nearer the rim and the one the curve crops first.
     SetRimLabelFont(backbuffer, windLabel.c_str(), WIND_LABEL_Y);
-    backbuffer.setTextColor(lgfx::color888(0, 210, 0));
+    backbuffer.setTextColor(lgfx::color888(0, 150, 0));
     PanelTrim::DrawTurnedText(
         backbuffer,
         PanelTrim::TextSlot::Wind,
