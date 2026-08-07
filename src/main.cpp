@@ -9,8 +9,10 @@
 #include "LGFX.h"
 #include "OpenSkyAuthTokenHandler.h"
 #include "WiFiConnection.h"
+#include "ui/AlignmentScreen.h"
 #include "ui/BootScreen.h"
 #include "ui/FrameTimer.h"
+#include "ui/PanelTrim.h"
 #include "ui/RadarSweep.h"
 #include "ui/StatusScreen.h"
 #include "ui/UpdateScreen.h"
@@ -27,6 +29,11 @@ FirmwareUpdater firmwareUpdater;
 
 RadarSweep::Settings sweepSettings;
 
+// Calibration mode: the alignment pattern in place of the radar. Read once, at
+// the end of setup, like every other setting -- saving the page restarts the
+// radar, so there is nothing to be gained by watching it change.
+bool alignmentTestEnabled = false;
+
 void setup()
 {
   Serial.begin(115200);
@@ -39,6 +46,14 @@ void setup()
   // lit up on whatever random content its RAM powered on with.
   tft.fillScreen(lgfx::color888(0, 0, 0));
   tft.setBrightness(255);
+
+  // Ahead of the first screen and so ahead of everything else, because the boot
+  // logo is the earliest thing that has to come out square. That puts the read
+  // of the settings before the Wi-Fi work below rather than after it; it only
+  // opens Preferences, so nothing there minds going first.
+  configServer.PrepareStorage();
+  PanelTrim::Begin(configServer.GetStoredString("screen-trim").toFloat());
+
   BootScreen::Draw(tft);
   const unsigned long bootStartedAt = millis();
 
@@ -50,6 +65,14 @@ void setup()
   if (ESP.getPsramSize() > 0)
     backbuffer.setPsram(true);
 
+  // Eight bits, and measured rather than assumed. Sixteen was tried, to give
+  // the trim's anti-aliased text more than RGB332's eight levels of green to
+  // land in, and it cost far more than the doubling of memory traffic it looks
+  // like: drawing a frame went from 11ms to 49ms, against a push already pinned
+  // at 27ms by the SPI clock. Thirteen frames a second to make small text
+  // smoother is not a trade worth making, and the text got its own answer --
+  // see PanelTrim, which now turns each run once when it changes rather than
+  // once per frame.
   backbuffer.setColorDepth(8);
   if (!backbuffer.createSprite(SCREEN_SIZE, SCREEN_SIZE)) {
     Serial.printf("FATAL: could not allocate %dx%d backbuffer (%d bytes)\n",
@@ -57,10 +80,6 @@ void setup()
   }
 
   WiFi.mode(WIFI_STA);
-
-  // The stored network decides which mode the page is served in, so the
-  // settings have to be readable before that decision is made.
-  configServer.PrepareStorage();
 
   // Start the join before holding the logo, not after it, and let the logo
   // cover the whole join budget. The association takes a second or two on a
@@ -109,6 +128,7 @@ void setup()
                    "Configure me at:",
                    mdnsUrl,
                    "or " + WiFi.localIP().toString(),
+                   "",
                    "v" FIRMWARE_VERSION);
 
   // Keep the address visible long enough to read while the asynchronous
@@ -127,6 +147,7 @@ void setup()
   firmwareUpdater.Initialise();
 
   sweepSettings = RadarSweep::LoadSettings(configServer);
+  alignmentTestEnabled = configServer.GetStoredString("alignment-test") == "true";
 }
 
 void loop()
@@ -148,6 +169,20 @@ void loop()
     // this board does not have the contiguous heap for two.
     aircraftManager.SuspendNetworkTask();
     UpdateScreen::RunFirmwareUpdate(tft, firmwareUpdater);
+    return;
+  }
+
+  // Calibration. Below the restart and update checks above so the page can
+  // still be saved and the radar still update itself out of this mode, and
+  // painted once rather than per frame -- nothing on the pattern moves, and
+  // holding the panel still is what makes it possible to sight along.
+  if (alignmentTestEnabled) {
+    static bool alignmentDrawn = false;
+    if (!alignmentDrawn) {
+      AlignmentScreen::Draw(tft);
+      alignmentDrawn = true;
+    }
+    delay(10);
     return;
   }
 
@@ -184,7 +219,7 @@ void loop()
   );
 
   const uint32_t pushStartedUs = micros();
-  backbuffer.pushSprite(0, 0);
+  PanelTrim::PushFrame(backbuffer);
   const uint32_t frameEndedUs = micros();
 
   FrameTimer::Record(pushStartedUs - drawStartedUs,

@@ -8,6 +8,7 @@
 #include <ESPmDNS.h>
 #include <WiFi.h>
 
+#include "DisplayConfig.h"
 #include "FirmwareVersion.h"
 
 // The radar answers every name on the setup hotspot, which is what makes a
@@ -85,7 +86,7 @@ struct PageValues {
     String scanlineEnabled, sweepPeriod, speedEnabled, speedUnit;
     String altitudeEnabled, altitudeUnit, destinationEnabled, windEnabled;
     String clockEnabled, clockFormat;
-    String aircraftMarker, autoUpdate;
+    String aircraftMarker, autoUpdate, screenTrim, alignmentTest;
 
     // Wi-Fi section and the mode it is being shown in.
     String setupMode, wifiSsid, wifiPassPlaceholder;
@@ -1000,6 +1001,41 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                 </fieldset>
 
                 <fieldset class="config-section">
+                    <legend>Panel alignment</legend>
+                    <p class="section-note">
+                        For a display whose glass sits slightly crooked in its bezel, so the
+                        clock digits and text run a little downhill. Turns the whole picture
+                        by this many degrees: positive turns it clockwise, so use a negative
+                        value if the right-hand side of a horizontal line sits too low.
+                        Leave at 0 unless you can see the tilt &mdash; anything other than 0
+                        slows each frame down. A quarter turn is not this setting.
+                    </p>
+                    <label class="field-row">
+                    <span>Rotation trim (in &deg;):</span>
+                    <input
+                        name="screen-trim"
+                        type="number"
+                        min="%SCREEN_TRIM_MIN%"
+                        step="0.1"
+                        max="%SCREEN_TRIM_MAX%"
+                        value='%SCREEN_TRIM%'>
+                    </label>
+
+                    <div class="display-option">
+                        <label class="display-toggle" for="alignment-test">
+                            <span>Show alignment pattern instead of the radar</span>
+                            <input id="alignment-test" name="alignment-test" type="checkbox" %ALIGNMENT_TEST%>
+                        </label>
+                    </div>
+                    <p class="section-note">
+                        Puts a crosshair, a ring on the outermost pixels, and a degree scale on
+                        the display so you can measure the tilt against whatever the radar is
+                        mounted in. Set the trim, save, look, repeat &mdash; then clear this box.
+                        The radar shows no aircraft while it is ticked.
+                    </p>
+                </fieldset>
+
+                <fieldset class="config-section">
                     <legend>Firmware updates</legend>
                     <p class="section-note">
                         The radar checks for a new release once an hour. Installing takes about a
@@ -1664,6 +1700,16 @@ void ConfigurationWebServer::EnsureDefaults() {
     // security fixes waiting on someone opening this page.
     ensureKey("auto-update", "true");
 
+    // Square by default, because almost every module is. This one is per-unit
+    // calibration rather than a preference -- it is the only setting here whose
+    // right value is a property of the physical panel in front of the owner.
+    ensureKey("screen-trim", "0");
+
+    // Never on by default, and not something a firmware update should ever turn
+    // on: it replaces the radar face entirely, so a unit that came up showing it
+    // would read as broken rather than as being calibrated.
+    ensureKey("alignment-test", "false");
+
     prefs.end();
 }
 
@@ -1729,6 +1775,8 @@ void ConfigurationWebServer::Initialise(FirmwareUpdater& updater, Mode serveMode
         values.clockFormat = prefs.getString("clock-format", "24h");
         values.aircraftMarker = prefs.getString("aircraft-marker", "radar");
         values.autoUpdate = prefs.getString("auto-update", "true");
+        values.screenTrim = EscapeHtmlAttribute(prefs.getString("screen-trim", "0"));
+        values.alignmentTest = prefs.getString("alignment-test", "false");
         const String storedSsid = prefs.getString("wifi-ssid", "");
         prefs.end();
 
@@ -1816,6 +1864,10 @@ void ConfigurationWebServer::Initialise(FirmwareUpdater& updater, Mode serveMode
                 if (var == "MARKER_DOT_SELECTED") return values.aircraftMarker == "dot" ? "selected" : "";
                 if (var == "AUTO_UPDATE_ON_SELECTED")  return values.autoUpdate != "false" ? "selected" : "";
                 if (var == "AUTO_UPDATE_OFF_SELECTED") return values.autoUpdate == "false" ? "selected" : "";
+                if (var == "SCREEN_TRIM")    return values.screenTrim;
+                if (var == "ALIGNMENT_TEST") return values.alignmentTest == "true" ? "checked" : "";
+                if (var == "SCREEN_TRIM_MIN") return String(-SCREEN_TRIM_MAX_DEGREES, 1);
+                if (var == "SCREEN_TRIM_MAX") return String(SCREEN_TRIM_MAX_DEGREES, 1);
 
                 // Describes the build that is actually running, which after an
                 // over-the-air update is not necessarily the one that was
@@ -2047,6 +2099,9 @@ void ConfigurationWebServer::Initialise(FirmwareUpdater& updater, Mode serveMode
         saveIf("latitude", [](const String& v) { return IsNumberInRange(v, -90.0, 90.0); });
         saveIf("longitude", [](const String& v) { return IsNumberInRange(v, -180.0, 180.0); });
         saveIf("radius", [](const String& v) { return IsNumberInRange(v, 0.000001, 2.499999); });
+        saveIf("screen-trim", [](const String& v) {
+            return IsNumberInRange(v, -SCREEN_TRIM_MAX_DEGREES, SCREEN_TRIM_MAX_DEGREES);
+        });
         saveIf("geocoder-url", IsHttpUrl);
         saveIfOneOf("speed-unit", { "knots", "meters-second" });
         saveIfOneOf("altitude-unit", { "feet", "meters", "kft" });
@@ -2109,6 +2164,7 @@ void ConfigurationWebServer::Initialise(FirmwareUpdater& updater, Mode serveMode
         prefs.putString("destination", request->hasParam("destination", true) ? "true" : "false");
         prefs.putString("wind", request->hasParam("wind", true) ? "true" : "false");
         prefs.putString("clock", request->hasParam("clock", true) ? "true" : "false");
+        prefs.putString("alignment-test", request->hasParam("alignment-test", true) ? "true" : "false");
         prefs.end();
 
         request->send(200, "text/html",

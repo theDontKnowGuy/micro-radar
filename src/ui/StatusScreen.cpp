@@ -2,6 +2,8 @@
 
 #include <cmath>
 
+#include "ui/PanelTrim.h"
+
 namespace {
 
 // Tried largest first: the first entry whose every line clears the bezel wins,
@@ -63,6 +65,8 @@ void ShowStatusScreen(LGFX& tft,
                       const String& fourth,
                       const String& fifth)
 {
+  LovyanGFX& canvas = PanelTrim::Canvas(tft);
+
   const String lines[] = { first, second, third, fourth, fifth };
   int count = 0;
   for (const String& line : lines)
@@ -70,15 +74,15 @@ void ShowStatusScreen(LGFX& tft,
 
   // The ladder is walked at scale 1 throughout -- picking a bigger face is what
   // this does instead of multiplying a small one.
-  tft.setTextSize(1);
+  canvas.setTextSize(1);
 
   int chosenIndex = SmallestFontIndex;
   int lineHeight = 0;
 
   for (int candidate = 0; candidate <= SmallestFontIndex; candidate++) {
-    tft.setFont(FontLadder[candidate]);
+    canvas.setFont(FontLadder[candidate]);
 
-    const int fontHeight = tft.fontHeight();
+    const int fontHeight = canvas.fontHeight();
     const int candidateLineHeight = fontHeight + LineGap;
 
     int y = FirstLineTop(count, candidateLineHeight, fontHeight);
@@ -95,7 +99,7 @@ void ShowStatusScreen(LGFX& tft,
       const int bottom = top + fontHeight;
       const int dy = abs(top) > abs(bottom) ? abs(top) : abs(bottom);
 
-      if (tft.textWidth(line) > 2 * HalfWidthAt(dy))
+      if (canvas.textWidth(line) > 2 * HalfWidthAt(dy))
         fits = false;
 
       y += candidateLineHeight;
@@ -108,9 +112,9 @@ void ShowStatusScreen(LGFX& tft,
     }
   }
 
-  tft.setFont(FontLadder[chosenIndex]);
+  canvas.setFont(FontLadder[chosenIndex]);
 
-  const int fontHeight = tft.fontHeight();
+  const int fontHeight = canvas.fontHeight();
   if (lineHeight == 0) {
     // Nothing in the ladder fit. The smallest face is drawn anyway and allowed
     // to overrun the bezel -- a line clipped at the rim is still worth more to
@@ -118,19 +122,23 @@ void ShowStatusScreen(LGFX& tft,
     lineHeight = fontHeight + LineGap;
   }
 
-  tft.fillScreen(lgfx::color888(0, 0, 0));
-  tft.setTextColor(lgfx::color888(0, 255, 0));
+  canvas.fillScreen(lgfx::color888(0, 0, 0));
+  canvas.setTextColor(lgfx::color888(0, 255, 0));
 
   int y = FirstLineTop(count, lineHeight, fontHeight);
   for (const String& line : lines) {
     if (line.isEmpty())
       continue;
-    tft.drawCentreString(line, SCREEN_SIZE_DIV_2, y);
+    canvas.drawCentreString(line, SCREEN_SIZE_DIV_2, y);
     y += lineHeight;
   }
 
-  // Everything else that draws straight to the panel expects the default face
-  // at the default scale.
-  tft.setFont(&fonts::Font0);
-  tft.setTextSize(1);
+  PanelTrim::Present(tft);
+
+  // Everything else that draws on this canvas expects the default face at the
+  // default scale. Reset on the canvas rather than on the panel, because with a
+  // trim set those are different objects and the panel's own text state is
+  // never touched by anything here.
+  canvas.setFont(&fonts::Font0);
+  canvas.setTextSize(1);
 }

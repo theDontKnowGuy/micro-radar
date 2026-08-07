@@ -1,6 +1,7 @@
 #include "AircraftManager.h"
 
 #include "DisplayConfig.h" // SCREEN_SIZE / SCREEN_SIZE_DIV_2, per selected panel
+#include "ui/PanelTrim.h"
 
 #include <ctime>
 
@@ -8,14 +9,46 @@ constexpr unsigned long LABEL_LAYOUT_INTERVAL_MS = 1000;
 constexpr unsigned long WIND_FETCH_INTERVAL_MS = 15UL * 60UL * 1000UL;
 constexpr unsigned long WIND_RETRY_INTERVAL_MS = 60UL * 1000UL;
 constexpr unsigned long WIND_STALE_INTERVAL_MS = 60UL * 60UL * 1000UL;
-constexpr int WIND_LABEL_WIDTH = 108;
-constexpr int WIND_LABEL_HEIGHT = 11;
+// The two rim labels -- the wind report at the top of the face, the location
+// name at the bottom. Drawn in a real proportional face rather than the 6x8
+// bitmap they used to share with the aircraft blocks, because at 6x8 a stem is
+// one pixel wide, and a one-pixel stem is the one thing no amount of care can
+// turn by three degrees and leave readable. See PanelTrim; FreeSansBold9pt7b is
+// 22 rows tall and puts two pixels in a stem, which survives it.
+constexpr int RIM_LABEL_HEIGHT = 22;
+
+// What the label solver keeps clear for one, which has to cover the longest run
+// either carries: "Ben Gurion Airport" measures 163 at this size and a full
+// wind report 158.
+constexpr int RIM_LABEL_WIDTH = 170;
+
+// How far short of the outer range ring a label has to stop. The ring is drawn
+// on the outermost row the raster has, so a label measured against the full
+// radius is a label touching it -- which is what the first attempt at this did,
+// at both ends of the face.
+constexpr int RIM_LABEL_CLEARANCE = 6;
+
+constexpr int WIND_LABEL_WIDTH = RIM_LABEL_WIDTH;
+constexpr int WIND_LABEL_HEIGHT = RIM_LABEL_HEIGHT;
 constexpr int WIND_LABEL_X = (SCREEN_SIZE - WIND_LABEL_WIDTH) / 2;
-constexpr int WIND_LABEL_Y = 16;
-constexpr int LOCATION_LABEL_WIDTH = 108;
-constexpr int LOCATION_LABEL_HEIGHT = 11;
+
+// Ten rows lower than the old bitmap label sat, because the topmost row of a
+// block is the narrowest part of it on a round face and this face is now taller
+// and wider. Allowing for the clearance above, y=16 offers 128 pixels against
+// the 158 a wind report wants, and y=26 offers 160.
+constexpr int WIND_LABEL_Y = 26;
+
+constexpr int LOCATION_LABEL_WIDTH = RIM_LABEL_WIDTH;
+constexpr int LOCATION_LABEL_HEIGHT = RIM_LABEL_HEIGHT;
 constexpr int LOCATION_LABEL_X = (SCREEN_SIZE - LOCATION_LABEL_WIDTH) / 2;
-constexpr int LOCATION_LABEL_Y = SCREEN_SIZE - WIND_LABEL_Y - LOCATION_LABEL_HEIGHT;
+
+// Anchored by its bottom row, for the mirror of the reason the wind is anchored
+// by its top one. At 344, where the old label ended, the face offers 118 pixels
+// against the 163 a full-length name wants; at 331 it offers 164. Everything
+// above -- the update notice, and the clock above that -- follows this up the
+// face, which is why the clock now sits 24 rows higher than it once did.
+constexpr int LOCATION_LABEL_BOTTOM = 331;
+constexpr int LOCATION_LABEL_Y = LOCATION_LABEL_BOTTOM - LOCATION_LABEL_HEIGHT;
 // Shown only while a firmware release is waiting for the owner to confirm it.
 // Sits above the location name rather than below: both panels are round, so the
 // rows past the location label fall outside the visible circle.
@@ -138,16 +171,56 @@ void LogParseFailure(const char* what, const DeserializationError& error, const 
                   what, error ? error.c_str() : missing);
 }
 
+// Half the width the round face offers `dy` rows from its centre, less whatever
+// clearance the caller wants kept between its text and the rim. Same chord
+// StatusScreen works out for its own text, and needed here for the same reason:
+// the rim labels sit where the face is narrowing fastest, so what fits is a
+// question about their distance from the middle rather than about SCREEN_SIZE.
+int FaceHalfWidthAt(int dy, int clearance)
+{
+    const int radius = CLOCK_FACE_CENTRE - clearance;
+    const int squared = radius * radius - dy * dy;
+    return squared <= 0 ? 0 : static_cast<int>(sqrtf(static_cast<float>(squared)));
+}
+
+// Sets the largest face a rim label can be drawn in without running into the
+// curve, measured against the block's outer row -- the top one for the label
+// above the centre, the bottom one for the label below it, since that is the
+// edge nearer the rim in each case.
+//
+// A ladder rather than a fixed choice because the location name is whatever its
+// owner typed. Eighteen characters of "Ben Gurion Airport" fits the proportional
+// face; eighteen of something wider might not, and a name that runs off the
+// side of a round screen is worse than a small one that does not.
+void SetRimLabelFont(LGFX_Sprite& backbuffer, const char* text, int outerRowY)
+{
+    backbuffer.setTextSize(1);
+    backbuffer.setFont(&fonts::FreeSansBold9pt7b);
+
+    const int available = 2 * FaceHalfWidthAt(abs(outerRowY - CLOCK_FACE_CENTRE),
+                                              RIM_LABEL_CLEARANCE);
+    if (backbuffer.textWidth(text) <= available)
+        return;
+
+    backbuffer.setFont(&fonts::Font0);
+}
+
 // Blanks the given block of the face plus a margin all round it, so that what
 // is drawn into it afterwards has nothing but background behind or beside it.
 // Takes the drawn extents and adds the margin itself: every caller wants the
 // same margin, and one that had to add it would also have to remember to take
 // it off the origin.
+//
+// Turned with the digits it carries, and centred on a position turned the same
+// way. Both matter: an upright plate under level digits gives the trim away
+// wherever a range ring crosses it, and a plate centred where the digits were
+// before their own position was turned sits to one side of them.
 void ClearClockPlate(LGFX_Sprite& backbuffer, int x, int y, int width, int height)
 {
-    backbuffer.fillRect(
-        x - CLOCK_CLEAR_PADDING,
-        y - CLOCK_CLEAR_PADDING,
+    PanelTrim::FillTurnedPlate(
+        backbuffer,
+        x + width / 2,
+        y + height / 2,
         width + 2 * CLOCK_CLEAR_PADDING,
         height + 2 * CLOCK_CLEAR_PADDING,
         lgfx::color888(0, 0, 0)
@@ -1760,13 +1833,22 @@ void AircraftManager::DrawWindInfo(LGFX_Sprite& backbuffer) const
         millis() - lastWindUpdate >= WIND_STALE_INTERVAL_MS)
         return;
 
-    backbuffer.setTextSize(1);
+    // Measured against its top row: this block sits above the centre, so that
+    // is the edge nearer the rim and the one the curve crops first.
+    SetRimLabelFont(backbuffer, windLabel.c_str(), WIND_LABEL_Y);
     backbuffer.setTextColor(lgfx::color888(0, 210, 0));
-    backbuffer.drawCentreString(
-        windLabel,
+    PanelTrim::DrawTurnedText(
+        backbuffer,
+        PanelTrim::TextSlot::Wind,
+        windLabel.c_str(),
         SCREEN_SIZE_DIV_2,
-        WIND_LABEL_Y
+        WIND_LABEL_Y + WIND_LABEL_HEIGHT / 2
     );
+
+    // Everything else on the face draws in the default face at the default
+    // scale, and both are state on the sprite.
+    backbuffer.setFont(&fonts::Font0);
+    backbuffer.setTextSize(1);
 }
 
 void AircraftManager::DrawClock(LGFX_Sprite& backbuffer) const
@@ -1826,7 +1908,17 @@ void AircraftManager::DrawClock(LGFX_Sprite& backbuffer) const
         );
 
     backbuffer.setTextColor(lgfx::color888(CLOCK_COLOR_R, CLOCK_COLOR_G, CLOCK_COLOR_B));
-    backbuffer.drawString(digits, x, CLOCK_LABEL_Y);
+
+    // Both the digits and the plate cleared for them above go through the same
+    // turn, so they stay square with each other however far out of true the
+    // panel is mounted.
+    PanelTrim::DrawTurnedText(
+        backbuffer,
+        PanelTrim::TextSlot::ClockDigits,
+        digits,
+        x + digitsWidth / 2,
+        CLOCK_LABEL_Y + CLOCK_DIGIT_HEIGHT / 2
+    );
 
     // Everything else on the face draws in the default font at the default
     // scale, and both are global state on the sprite.
@@ -1838,10 +1930,12 @@ void AircraftManager::DrawClock(LGFX_Sprite& backbuffer) const
     // constants for why it is not on their baseline.
     if (suffix != nullptr) {
         backbuffer.setTextSize(CLOCK_SUFFIX_TEXT_SIZE);
-        backbuffer.drawString(
+        PanelTrim::DrawTurnedText(
+            backbuffer,
+            PanelTrim::TextSlot::ClockSuffix,
             suffix,
-            x + digitsWidth + CLOCK_SUFFIX_GAP,
-            CLOCK_LABEL_Y
+            x + digitsWidth + CLOCK_SUFFIX_GAP + CLOCK_SUFFIX_WIDTH / 2,
+            CLOCK_LABEL_Y + CLOCK_SUFFIX_HEIGHT / 2
         );
         backbuffer.setTextSize(1);
     }
@@ -1852,13 +1946,20 @@ void AircraftManager::DrawLocationInfo(LGFX_Sprite& backbuffer) const
     if (locationNameLabel.isEmpty())
         return;
 
-    backbuffer.setTextSize(1);
+    // Measured against its bottom row, for the mirror of the reason the wind is
+    // measured against its top one.
+    SetRimLabelFont(backbuffer, locationNameLabel.c_str(), LOCATION_LABEL_BOTTOM);
     backbuffer.setTextColor(lgfx::color888(100, 100, 100));
-    backbuffer.drawCentreString(
-        locationNameLabel,
+    PanelTrim::DrawTurnedText(
+        backbuffer,
+        PanelTrim::TextSlot::Location,
+        locationNameLabel.c_str(),
         SCREEN_SIZE_DIV_2,
-        LOCATION_LABEL_Y
+        LOCATION_LABEL_Y + LOCATION_LABEL_HEIGHT / 2
     );
+
+    backbuffer.setFont(&fonts::Font0);
+    backbuffer.setTextSize(1);
 }
 
 void AircraftManager::DrawUpdateNotice(LGFX_Sprite& backbuffer) const

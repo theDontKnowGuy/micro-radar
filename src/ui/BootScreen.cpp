@@ -3,6 +3,7 @@
 #include <Arduino.h>
 
 #include "BootLogo.h"
+#include "ui/PanelTrim.h"
 #include "ui/ProgressBar.h"
 
 namespace BootScreen {
@@ -21,7 +22,8 @@ constexpr int BAR_Y = SCREEN_SIZE_DIV_2 + 70;
 
 void Draw(LGFX& tft)
 {
-  tft.fillScreen(lgfx::color888(0, 0, 0));
+  LovyanGFX& canvas = PanelTrim::Canvas(tft);
+  canvas.fillScreen(lgfx::color888(0, 0, 0));
 
   lgfx::rgb565_t scanline[BootLogo::Width];
   size_t runIndex = 0;
@@ -30,7 +32,7 @@ void Draw(LGFX& tft)
   const int logoX = (SCREEN_SIZE - BootLogo::Width) / 2;
   const int logoY = (SCREEN_SIZE - BootLogo::Height) / 2;
 
-  tft.startWrite();
+  canvas.startWrite();
   for (uint16_t y = 0; y < BootLogo::Height; y++) {
     for (uint16_t x = 0; x < BootLogo::Width; x++) {
       if (runRemaining == 0 && runIndex < BootLogo::RunCount) {
@@ -44,30 +46,40 @@ void Draw(LGFX& tft)
         runRemaining--;
     }
 
-    tft.pushImage(logoX, logoY + y, BootLogo::Width, 1, scanline);
+    canvas.pushImage(logoX, logoY + y, BootLogo::Width, 1, scanline);
   }
-  tft.endWrite();
+  canvas.endWrite();
 
-  ProgressBar::DrawOutline(tft, BAR_Y, BAR_TROUGH_COLOR);
+  ProgressBar::DrawOutline(canvas, BAR_Y, BAR_TROUGH_COLOR);
+  PanelTrim::Present(tft);
 }
 
 void Hold(LGFX& tft, unsigned long startedAt, bool (*stillWaiting)(), unsigned long maxHoldMs)
 {
   // Repainted only when the whole-percent figure moves, same as the update
-  // screen: 100 small fills over seven seconds, not one per pass of the loop.
+  // screen: 100 fills over seven seconds, not one per pass of the loop. That
+  // matters more than it used to -- with a trim set, each one costs a turned
+  // push of the whole screen rather than a fill the width of the bar.
+  //
+  // The logo underneath is not redrawn between them: the canvas keeps what was
+  // last drawn on it, so the bar grows over the artwork exactly as it does when
+  // the canvas is the panel.
+  LovyanGFX& canvas = PanelTrim::Canvas(tft);
   int lastPercent = -1;
   unsigned long elapsed = 0;
   while ((elapsed = millis() - startedAt) < HoldMs) {
     const int percent = static_cast<int>((elapsed * 100) / HoldMs);
     if (percent != lastPercent) {
       lastPercent = percent;
-      ProgressBar::DrawFill(tft, BAR_Y, percent, BAR_COLOR);
+      ProgressBar::DrawFill(canvas, BAR_Y, percent, BAR_COLOR);
+      PanelTrim::Present(tft);
     }
     delay(10);
   }
 
   // The loop above always stops a percent or two short of the end.
-  ProgressBar::DrawFill(tft, BAR_Y, 100, BAR_COLOR);
+  ProgressBar::DrawFill(canvas, BAR_Y, 100, BAR_COLOR);
+  PanelTrim::Present(tft);
 
   // The screen is left exactly as it is, full bar and all, while whatever the
   // caller is waiting on gets the rest of its time. Cut short the moment it
