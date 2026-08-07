@@ -47,6 +47,20 @@ constexpr int CLOCK_DIGITS_WIDTH = static_cast<int>(CLOCK_FONT_WIDTH * CLOCK_TEX
 constexpr int CLOCK_SUFFIX_TEXT_SIZE = 3;
 constexpr int CLOCK_SUFFIX_GAP = 6;
 constexpr int CLOCK_SUFFIX_WIDTH = 2 * 6 * CLOCK_SUFFIX_TEXT_SIZE; // "AM" in the default font
+constexpr int CLOCK_SUFFIX_HEIGHT = 8 * CLOCK_SUFFIX_TEXT_SIZE;
+
+// The clock is drawn onto a cleared plate rather than over whatever is already
+// on the face -- the label solver only weighs its region, and aircraft markers
+// are not placed by the solver at all, so at any moment something can be under
+// the digits. The margin is what keeps the two apart: with only the drawn
+// extents cleared, a data block ending one pixel outside them still reads as
+// touching the time. Wider than the suffix gap on purpose, so the digit plate
+// and the suffix plate meet instead of leaving an uncleared sliver between.
+constexpr int CLOCK_CLEAR_PADDING = 4;
+static_assert(
+    2 * CLOCK_CLEAR_PADDING > CLOCK_SUFFIX_GAP,
+    "The digit and suffix plates no longer meet; widen the padding or close the gap"
+);
 
 // Reserved for the label solver as the union of the two: the digits are centred
 // on the face and the suffix overhangs to the right of them, so this does not
@@ -67,7 +81,7 @@ constexpr int CLOCK_CORNER_DX = CLOCK_LABEL_X + CLOCK_DIGITS_WIDTH - CLOCK_FACE_
 constexpr int CLOCK_CORNER_DY = CLOCK_LABEL_Y + CLOCK_LABEL_HEIGHT - CLOCK_FACE_CENTRE;
 constexpr int CLOCK_SUFFIX_DX = CLOCK_LABEL_X + CLOCK_LABEL_WIDTH - CLOCK_FACE_CENTRE;
 constexpr int CLOCK_SUFFIX_DY =
-    CLOCK_LABEL_Y + 8 * CLOCK_SUFFIX_TEXT_SIZE - CLOCK_FACE_CENTRE;
+    CLOCK_LABEL_Y + CLOCK_SUFFIX_HEIGHT - CLOCK_FACE_CENTRE;
 
 static_assert(
     CLOCK_LABEL_Y + CLOCK_LABEL_HEIGHT < UPDATE_LABEL_Y,
@@ -122,6 +136,22 @@ void LogParseFailure(const char* what, const DeserializationError& error, const 
 {
     Serial.printf("[WARN] %s response parse failed: %s\n",
                   what, error ? error.c_str() : missing);
+}
+
+// Blanks the given block of the face plus a margin all round it, so that what
+// is drawn into it afterwards has nothing but background behind or beside it.
+// Takes the drawn extents and adds the margin itself: every caller wants the
+// same margin, and one that had to add it would also have to remember to take
+// it off the origin.
+void ClearClockPlate(LGFX_Sprite& backbuffer, int x, int y, int width, int height)
+{
+    backbuffer.fillRect(
+        x - CLOCK_CLEAR_PADDING,
+        y - CLOCK_CLEAR_PADDING,
+        width + 2 * CLOCK_CLEAR_PADDING,
+        height + 2 * CLOCK_CLEAR_PADDING,
+        lgfx::color888(0, 0, 0)
+    );
 }
 
 }  // namespace
@@ -1431,11 +1461,15 @@ void AircraftManager::SolveAircraftLabels(std::vector<RenderAircraft>& aircraft)
         }
 
         if (displayClock && hasUtcOffset.load()) {
+            // The margin is reserved along with the digits. Anything the solver
+            // still puts here is going to be cut by the plate when the clock
+            // draws over it, and a label chopped down the middle is worse than
+            // one moved: better that the cost sees the whole plate.
             const LabelBox clockBox = {
-                CLOCK_LABEL_X,
-                CLOCK_LABEL_Y,
-                CLOCK_LABEL_WIDTH,
-                CLOCK_LABEL_HEIGHT
+                CLOCK_LABEL_X - CLOCK_CLEAR_PADDING,
+                CLOCK_LABEL_Y - CLOCK_CLEAR_PADDING,
+                CLOCK_LABEL_WIDTH + 2 * CLOCK_CLEAR_PADDING,
+                CLOCK_LABEL_HEIGHT + 2 * CLOCK_CLEAR_PADDING
             };
             addReservedLabelCost(clockBox);
         }
@@ -1766,8 +1800,6 @@ void AircraftManager::DrawClock(LGFX_Sprite& backbuffer) const
         snprintf(digits, sizeof(digits), "%02d:%02d", parts.tm_hour, parts.tm_min);
     }
 
-    backbuffer.setTextColor(lgfx::color888(CLOCK_COLOR_R, CLOCK_COLOR_G, CLOCK_COLOR_B));
-
     // The digits are centred on the face on their own. The suffix hangs off
     // their right rather than being counted into the centring: it is a modifier
     // on the time, and a clock whose digits shift sideways twice a day to make
@@ -1776,6 +1808,24 @@ void AircraftManager::DrawClock(LGFX_Sprite& backbuffer) const
     backbuffer.setTextSize(CLOCK_TEXT_SCALE);
     const int digitsWidth = backbuffer.textWidth(digits);
     const int x = (SCREEN_SIZE - digitsWidth) / 2;
+
+    // Cleared from the drawn extents rather than from the reserved box: at
+    // 12-hour a single-digit hour is narrower than the region the solver keeps
+    // clear, and the plate should be no larger than the time it is carrying.
+    // Same black the frame starts from, so the radar rings crossing here are
+    // cut as well -- the point is a clock that reads at a glance, and a ring
+    // running through the digits costs that as much as a callsign does.
+    ClearClockPlate(backbuffer, x, CLOCK_LABEL_Y, digitsWidth, CLOCK_DIGIT_HEIGHT);
+    if (suffix != nullptr)
+        ClearClockPlate(
+            backbuffer,
+            x + digitsWidth + CLOCK_SUFFIX_GAP,
+            CLOCK_LABEL_Y,
+            CLOCK_SUFFIX_WIDTH,
+            CLOCK_SUFFIX_HEIGHT
+        );
+
+    backbuffer.setTextColor(lgfx::color888(CLOCK_COLOR_R, CLOCK_COLOR_G, CLOCK_COLOR_B));
     backbuffer.drawString(digits, x, CLOCK_LABEL_Y);
 
     // Everything else on the face draws in the default font at the default

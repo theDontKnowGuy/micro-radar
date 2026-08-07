@@ -3,8 +3,8 @@
 
 The artwork is cropped to a tight square around its visible pixels -- so the
 logo fills the whole panel rather than floating inside a black border -- then
-scaled to SCREEN_SIZE and stored as RGB565 run-length pairs that ShowBootLogo()
-in src/main.cpp decodes one scanline at a time.
+scaled to SCREEN_SIZE and stored as RGB565 run-length pairs that BootScreen::Draw()
+in src/ui/BootScreen.cpp decodes one scanline at a time.
 
 The panel is round, so a circular logo scaled to the full framebuffer lands
 exactly on the visible disc; only the (black) framebuffer corners fall outside.
