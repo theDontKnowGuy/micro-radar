@@ -58,12 +58,17 @@ The pin assignment is defined in [`include/LGFX.h`](include/LGFX.h).
 | `VCC` | Per display specification |
 | `SCL` / `SCLK` | GPIO 12 |
 | `SDA` / `MOSI` | GPIO 11 |
-| `DC` | GPIO 2 |
+| `DC` | GPIO 3 |
 | `CS` | GPIO 13 |
 | `RST` / `RES` | GPIO 6 |
-| `BL` / `LED` | `3V3` |
+| `BL` / `LED` | GPIO 17 |
 
 `MISO`/`SDO` and `TE` are not used.
+
+The backlight is PWM-driven rather than tied to `3V3`, so the panel can be dimmed
+and stays dark until the first frame is on screen. If your display board exposes
+`BL` as a raw LED anode instead of a logic-level enable, switch it with a
+transistor rather than driving it from the GPIO.
 
 > [!IMPORTANT]
 > `SCL` on GPIO 12 and `SDA` on GPIO 11 is deliberate, and looks backwards next
@@ -73,7 +78,10 @@ The pin assignment is defined in [`include/LGFX.h`](include/LGFX.h).
 > the time to push a 360 × 360 frame and is the difference between a jumpy and a
 > smooth radar sweep.
 
-If your wiring is different, update `include/LGFX.h`.
+If your wiring is different, update `include/LGFX.h`. Keep off GPIO 26–32 (SPI
+flash), 33–37 (the octal PSRAM this build requires), 19/20 (native USB, which
+carries the serial console here), and 0/45/46 (strapping). GPIO 3 is also a
+strapping pin, but it only selects the JTAG signal source and is safe to drive.
 
 ## Build and upload
 

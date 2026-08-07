@@ -12,6 +12,7 @@ class LGFX : public lgfx::LGFX_Device
     // Not lgfx::Bus_SPI -- the GC9B72 needs half-duplex write-only transfers,
     // which only ESP-IDF's spi_master provides. See Bus_GC9B72_SPI.hpp.
     lgfx::Bus_GC9B72_SPI _bus;
+    lgfx::Light_PWM _light;
 
 public:
     LGFX(void)
@@ -35,7 +36,11 @@ public:
             cfg.spi_mode = 0;
             cfg.pin_mosi = 11; // TFT SDA/MOSI  -> S3 native FSPID
             cfg.pin_sclk = 12; // TFT SCL/SCLK  -> S3 native FSPICLK
-            cfg.pin_dc = 2;
+            // GPIO3 is an S3 strapping pin, but it only selects the JTAG signal
+            // source -- it has no say in boot mode -- so driving it as DC is
+            // safe. It floats until the bus is configured, which is fine: the
+            // panel ignores DC while CS is high.
+            cfg.pin_dc = 3;
             _bus.config(cfg);
             _panel.setBus(&_bus);
         }
@@ -50,6 +55,18 @@ public:
             cfg.rgb_order = true;
             cfg.readable = false; // no SDO wired
             _panel.config(cfg);
+        }
+        {
+            // Backlight on its own pin instead of tied to 3V3, so the panel can
+            // be dimmed and can stay dark until something has been drawn.
+            // Panel_Device::init() brings the light up at brightness 0 -- call
+            // setBrightness() after tft.init() or the screen stays black.
+            auto cfg = _light.config();
+            cfg.pin_bl = 17; // TFT BL/BLK
+            cfg.freq = 12000;
+            cfg.pwm_channel = 7;
+            _light.config(cfg);
+            _panel.setLight(&_light);
         }
 
         setPanel(&_panel);

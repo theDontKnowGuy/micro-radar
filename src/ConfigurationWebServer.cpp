@@ -392,6 +392,10 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                 width: auto;
                 min-width: 0;
             }
+            /* display: grid above would otherwise beat the hidden attribute. */
+            .field-row[hidden] {
+                display: none;
+            }
             .credentials {
                 display: grid;
                 gap: .75rem;
@@ -719,14 +723,15 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                                 </button>
                             </div>
 
-                            <label class="field-row">
-                                <span>Other network:</span>
+                            <label class="field-row" id="wifi-manual-row" hidden>
+                                <span>Network name:</span>
                                 <input
                                     id="wifi-ssid-manual"
                                     name="wifi-ssid-manual"
                                     maxlength="32"
                                     autocomplete="off"
                                     spellcheck="false"
+                                    disabled
                                     placeholder="Hidden or out-of-range network name">
                             </label>
 
@@ -744,20 +749,20 @@ static const char CONFIG_HTML[] PROGMEM = R"(
 
                             <div class="text-xs">
                                 The radar joins 2.4 GHz networks only. Leave the password blank for an
-                                open network, or to keep the one already stored. A name typed above
-                                takes precedence over the list.
+                                open network, or to keep the one already stored. Pick "Other network"
+                                from the list to type a hidden network's name.
                             </div>
                             <div id="wifi-result" class="text-sm" aria-live="polite"></div>
+
+                            <dl class="network-diagnostics">
+                                <dt>Address</dt><dd>%NET_IP%</dd>
+                                <dt>Signal</dt><dd>%NET_RSSI%</dd>
+                                <dt>MAC</dt><dd>%NET_MAC%</dd>
+                                <dt>Uptime</dt><dd>%NET_UPTIME%</dd>
+                                <dt>Free memory</dt><dd>%NET_HEAP%</dd>
+                            </dl>
                         </div>
                     </details>
-
-                    <dl class="network-diagnostics">
-                        <dt>Address</dt><dd>%NET_IP%</dd>
-                        <dt>Signal</dt><dd>%NET_RSSI%</dd>
-                        <dt>MAC</dt><dd>%NET_MAC%</dd>
-                        <dt>Uptime</dt><dd>%NET_UPTIME%</dd>
-                        <dt>Free memory</dt><dd>%NET_HEAP%</dd>
-                    </dl>
 
                     <div class="network-actions">
                         <button type="button" id="forget-wifi" class="link-button" %FORGET_HIDDEN%>
@@ -867,22 +872,13 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                 <fieldset class="config-section">
                     <legend>OpenSky connection</legend>
                     <p class="section-note">
-                        Optional credentials increase API access limits. Without them the radar
-                        shares the anonymous allowance with everyone else on your public IP
-                        address, so aircraft refresh less often.
-                    </p>
-                    <p class="section-note">
                         To get your own: register a free account at
-                        <a href="https://opensky-network.org/index.php?option=com_users&amp;view=registration"
+                        <a href="https://opensky-network.org"
                            target="_blank" rel="noopener" class="underline">opensky-network.org</a>,
-                        sign in, then open
+                        sign in, then Register. Open
                         <a href="https://opensky-network.org/my-opensky/account"
                            target="_blank" rel="noopener" class="underline">Account &rarr; API client</a>
-                        and create a new API client. OpenSky shows the client secret only once,
-                        so copy both values into the fields below before leaving that page.
-                        Details are in the
-                        <a href="https://openskynetwork.github.io/opensky-api/rest.html"
-                           target="_blank" rel="noopener" class="underline">OpenSky API documentation</a>.
+                        and create a new API client.
                     </p>
                     <div class="credentials">
                     <label class="field-row">
@@ -1328,10 +1324,29 @@ static const char CONFIG_HTML[] PROGMEM = R"(
             const networkDetails = document.querySelector('.network-details');
             const ssidSelect = document.getElementById('wifi-ssid');
             const manualSsid = document.getElementById('wifi-ssid-manual');
+            const manualRow = document.getElementById('wifi-manual-row');
             const rescanButton = document.getElementById('rescan-wifi');
             const wifiResult = document.getElementById('wifi-result');
             let scanPolls = 0;
             let scanStarted = false;
+
+            // Sentinel value of the list entry that reveals the typed-name box.
+            // The radar knows to read it as "the name is in the other field".
+            const OTHER_SSID = '__other__';
+
+            // Kept disabled while hidden so a leftover name cannot be submitted
+            // after switching back to a network from the list.
+            function syncManualSsid(focusInput) {
+                const other = ssidSelect.value === OTHER_SSID;
+                manualRow.hidden = !other;
+                manualSsid.disabled = !other;
+                if (!other)
+                    manualSsid.value = '';
+                else if (focusInput)
+                    manualSsid.focus();
+            }
+
+            ssidSelect.addEventListener('change', function() { syncManualSsid(true); });
 
             function signalWords(rssi) {
                 if (rssi >= -55) return 'excellent';
@@ -1349,18 +1364,36 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                 blank.textContent = networks.length ? 'Select a network' : 'No networks found';
                 ssidSelect.appendChild(blank);
 
+                let sawCurrent = false;
                 networks.forEach(function(network) {
                     const option = document.createElement('option');
                     option.value = network.ssid;
                     option.textContent = network.ssid + ' - signal ' + signalWords(network.rssi)
                         + (network.secure ? '' : ', open');
                     option.selected = network.ssid === current;
+                    sawCurrent = sawCurrent || network.ssid === current;
                     ssidSelect.appendChild(option);
                 });
 
+                const other = document.createElement('option');
+                other.value = OTHER_SSID;
+                other.textContent = 'Other network...';
+                ssidSelect.appendChild(other);
+
+                // A stored network that is hidden or out of range never appears
+                // in the scan, so it starts out as the typed name instead of
+                // silently reading as "no network chosen".
+                if (current && !sawCurrent) {
+                    other.selected = true;
+                    syncManualSsid(false);
+                    manualSsid.value = current;
+                } else {
+                    syncManualSsid(false);
+                }
+
                 wifiResult.textContent = networks.length
                     ? ''
-                    : 'Nothing in range. Type the network name below if it is hidden.';
+                    : 'Nothing in range. Choose "Other network..." to type the name if it is hidden.';
             }
 
             // The radar answers the first request by starting a scan and saying
@@ -1555,7 +1588,10 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                 // Saving from the hotspot with no network chosen would reboot
                 // straight back into the hotspot, having stored everything else
                 // but still with nowhere to go.
-                if (setupMode && !ssidSelect.value && !manualSsid.value.trim()) {
+                const chosenSsid = ssidSelect.value === OTHER_SSID
+                    ? manualSsid.value.trim()
+                    : ssidSelect.value;
+                if (setupMode && !chosenSsid) {
                     networkDetails.open = true;
                     wifiResult.textContent = 'Choose a network, or type its name, before saving.';
                     return;
@@ -1699,7 +1735,7 @@ void ConfigurationWebServer::Initialise(FirmwareUpdater& updater, Mode serveMode
         values.wifiSsid = EscapeHtmlAttribute(storedSsid);
         values.setupMode = setupMode ? "setup" : "station";
         values.networkOpen = setupMode ? "open" : "";
-        values.networkSummary = setupMode ? "Choose a network" : "Change network";
+        values.networkSummary = "Network settings";
         values.forgetHidden = setupMode ? "hidden" : "";
         values.saveLabel = setupMode ? "Save and connect" : "Save";
         values.wifiPassPlaceholder = setupMode
@@ -2029,11 +2065,16 @@ void ConfigurationWebServer::Initialise(FirmwareUpdater& updater, Mode serveMode
             prefs.putString("opensky-secret", openskySecret);
 
         // A name typed into the "other network" box wins over the scan list, so
-        // a hidden network can be joined without it ever appearing there.
+        // a hidden network can be joined without it ever appearing there. The
+        // list's own "Other network" entry is that box's placeholder rather than
+        // a network name, so it never becomes one on its own.
         String ssid = submitted("wifi-ssid-manual");
         ssid.trim();
-        if (ssid.isEmpty())
+        if (ssid.isEmpty()) {
             ssid = submitted("wifi-ssid");
+            if (ssid == "__other__")
+                ssid = "";
+        }
 
         if (!ssid.isEmpty()) {
             const String previousSsid = prefs.getString("wifi-ssid", "");

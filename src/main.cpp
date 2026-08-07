@@ -330,6 +330,10 @@ void setup()
   // initialise LGFX + screen
   tft.init();
   tft.invertDisplay(DISPLAY_INVERT); // see DisplayConfig.h
+  // The backlight starts off (see LGFX.h). Clear the panel first so it is not
+  // lit up on whatever random content its RAM powered on with.
+  tft.fillScreen(lgfx::color888(0, 0, 0));
+  tft.setBrightness(255);
   ShowBootLogo();
 
   // At 360x360 the backbuffer is 129,600 bytes. Keeping that in SRAM leaves too
