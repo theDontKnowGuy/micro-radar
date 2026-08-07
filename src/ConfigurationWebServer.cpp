@@ -95,7 +95,7 @@ struct PageValues {
 
 // The radar has no login, so anything on the LAN can already reconfigure it on
 // purpose. What this stops is a page on the wider internet doing it without the
-// owner's knowledge: a form or fetch aimed at http://microradar.local/save from
+// owner's knowledge: a form or fetch aimed at http://radar.local/save from
 // an unrelated tab. A browser labels those with an Origin that is not ours.
 // Requests carrying no Origin at all (curl, scripts) are left alone -- they are
 // not the attack this is here for.
@@ -1676,9 +1676,19 @@ void ConfigurationWebServer::Initialise(FirmwareUpdater& updater, Mode serveMode
 
     EnsureDefaults();
 
-    // start mDNS and check result
-    if (!MDNS.begin("microradar")) {
+    // The radar gets whatever address the router hands it, and that address can
+    // change between boots -- mDNS is what makes the configuration page findable
+    // without going and looking it up. The IP still works and is still what the
+    // boot screen leads with, because a household with no mDNS resolver (some
+    // Android, some locked-down networks) has nothing else to go on.
+    if (!MDNS.begin(MdnsHostname)) {
         Serial.println("[WARN] Failed to start mDNS. Continuing without mDNS...");
+    }
+    else {
+        // Without the service record the name resolves but the radar does not
+        // show up in anything that browses for HTTP servers.
+        MDNS.addService("http", "tcp", port);
+        Serial.printf("mDNS responder started: http://%s\n", MdnsAddress);
     }
 
     if (mode == Mode::Setup) {
@@ -2105,7 +2115,8 @@ void ConfigurationWebServer::Initialise(FirmwareUpdater& updater, Mode serveMode
             mode == Mode::Setup
                 ? "Saved - joining " + EscapeHtmlAttribute(ssid) +
                   ". This hotspot disappears now; reconnect to your own network and open "
-                  "http://microradar.local"
+                  "http://" + String(MdnsAddress) +
+                  " -- the radar also shows its address on screen when it comes back up."
                 : String("Saved - restarting device..."));
 
         // Deliberately not ESP.restart() here: this runs on the AsyncTCP task,

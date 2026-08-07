@@ -62,16 +62,17 @@ void setup()
   // settings have to be readable before that decision is made.
   configServer.PrepareStorage();
 
-  // Start the join before holding the logo, not after it. The association takes
-  // a second or two on a good day and the logo is up for seven regardless, so
-  // running them together takes that time off the boot rather than adding to
-  // it.
+  // Start the join before holding the logo, not after it, and let the logo
+  // cover the whole join budget. The association takes a second or two on a
+  // good day and the logo is up for seven regardless, so running them together
+  // takes that time off the boot rather than adding to it; a router that needs
+  // longer gets it without the screen changing to say so.
   WiFiConnection::BeginJoin(configServer);
-  BootScreen::Hold(tft, bootStartedAt);
+  BootScreen::Hold(tft, bootStartedAt, WiFiConnection::JoinPending, WiFiConnection::JoinTimeoutMs);
 
   // No network, and no way to be configured except by serving the page over an
   // access point of the radar's own; that does not return.
-  if (!WiFiConnection::AwaitJoin(tft, bootStartedAt))
+  if (!WiFiConnection::FinishJoin())
     WiFiConnection::RunSetupPortal(tft, configServer, firmwareUpdater);
 
   // Start the clock on the radar face. Kept in UTC deliberately -- both offset
@@ -84,8 +85,11 @@ void setup()
   // begin background server for configuration
   configServer.Initialise(firmwareUpdater, ConfigurationWebServer::Mode::Station);
 
+  const String mdnsUrl = String("http://") + MdnsAddress;
   const String configurationUrl = String("http://") + WiFi.localIP().toString();
   Serial.print("Configure me at ");
+  Serial.print(mdnsUrl);
+  Serial.print(" or ");
   Serial.println(configurationUrl);
 
   // Once the radar starts updating itself the version on screen is the only way
@@ -93,17 +97,23 @@ void setup()
   // number here -- the release date and description are on the configuration
   // page, where there is room for them.
   //
-  // Scheme and address are one line: a URL split across two reads as two things
-  // to type. ShowStatusScreen sizes the type to this longest line, so the whole
-  // screen drops a step -- still comfortably readable at arm's length.
+  // Both addresses are shown, name first: the name survives the router handing
+  // out a different lease, but it needs an mDNS resolver at the other end, which
+  // not every phone or network has. The IP is the fallback that always works.
+  //
+  // Scheme and address stay on one line: a URL split across two reads as two
+  // things to type. The fallback line carries the bare IP rather than a second
+  // http:// -- ShowStatusScreen sizes the type to the longest line, and the
+  // scheme twice would cost a step of size for something already said above.
   ShowStatusScreen(tft,
                    "Configure me at:",
-                   configurationUrl,
+                   mdnsUrl,
+                   "or " + WiFi.localIP().toString(),
                    "v" FIRMWARE_VERSION);
 
   // Keep the address visible long enough to read while the asynchronous
   // configuration server is already available.
-  delay(4000);
+  delay(7000);
 
   // initialise aircraft manager
   aircraftManager.Initialise();

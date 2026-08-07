@@ -20,19 +20,8 @@ namespace {
 // page rather than two.
 constexpr const char* SetupHotspotName = "MicroRadar-Setup";
 
-// How long to wait for a join before giving up on it. The Arduino core's own
-// default is a silent 60s per attempt with no way out, which is long enough
-// that a mistyped password looks like a hang.
-constexpr unsigned long WifiConnectTimeoutMs = 20000;
-
-// A router that is still coming back up after a power cut answers the second
-// attempt when it did not answer the first. Two is enough to ride that out
-// without leaving a radar with a genuinely wrong password sitting on a blank
-// screen for a minute.
-constexpr int WifiConnectAttempts = 2;
-
-// Found by BeginJoin, waited on by AwaitJoin, and used again by the retry it
-// makes -- which is why they outlive the call that reads them.
+// Found by BeginJoin and waited on by everything after it, which is why they
+// outlive the call that reads them.
 String storedSsid;
 String storedPassword;
 
@@ -87,44 +76,54 @@ void BeginJoin(ConfigurationWebServer& configServer)
     ImportStoredWiFiCredentials(configServer, storedSsid, storedPassword);
   }
 
-  // WiFi.begin() only kicks the driver off -- the waiting is all in AwaitJoin.
-  if (!storedSsid.isEmpty())
-    WiFi.begin(storedSsid.c_str(), storedPassword.c_str());
+  if (storedSsid.isEmpty())
+    return;
+
+  // The retrying is the driver's job, not this module's. Its disconnect handler
+  // re-issues the association itself for every transient failure -- no AP found,
+  // handshake timeout, a router mid-reboot -- which covers the cases a manual
+  // retry here would have been for, and covers them sooner. What it will not do
+  // is come back from a disconnect this firmware asked for, so nothing below
+  // calls WiFi.disconnect() until the join has been given up on for good.
+  WiFi.setAutoReconnect(true);
+
+  // The name the radar gives the router's DHCP server, kept the same as the
+  // mDNS name so a router that publishes its leases under .local and the
+  // radar's own responder do not disagree about what this device is called.
+  // Has to precede WiFi.begin() -- the hostname goes out with the DHCP request.
+  WiFi.setHostname(MdnsHostname);
+
+  // Only kicks the driver off; the waiting happens under the boot logo.
+  WiFi.begin(storedSsid.c_str(), storedPassword.c_str());
 }
 
-bool AwaitJoin(LGFX& tft, unsigned long bootStartedAt)
+bool JoinPending()
 {
-  const bool haveCredentials = !storedSsid.isEmpty();
-  bool connected = haveCredentials && WiFi.status() == WL_CONNECTED;
+  return !storedSsid.isEmpty() && WiFi.status() != WL_CONNECTED;
+}
 
-  // The join is usually done by the time the logo comes down. If it is not --
-  // a slow router, a wrong password, an attempt that needs repeating -- this is
-  // where it gets said out loud, and the first attempt is given the rest of its
-  // timeout counted from when it actually started.
-  for (int attempt = 0; !connected && haveCredentials && attempt < WifiConnectAttempts; ++attempt) {
-    if (attempt == 0) {
-      const unsigned long spent = millis() - bootStartedAt;
-      if (spent >= WifiConnectTimeoutMs) {
-        WiFi.disconnect();
-        continue;
-      }
+bool FinishJoin()
+{
+  const bool connected = !storedSsid.isEmpty() && WiFi.status() == WL_CONNECTED;
 
-      ShowStatusScreen(tft, "Connecting to WiFi...", storedSsid);
-      connected = WiFi.waitForConnectResult(WifiConnectTimeoutMs - spent) == WL_CONNECTED;
-    }
-    else {
-      ShowStatusScreen(tft, "Connecting to WiFi...", storedSsid, "Retrying");
-      WiFi.begin(storedSsid.c_str(), storedPassword.c_str());
-      connected = WiFi.waitForConnectResult(WifiConnectTimeoutMs) == WL_CONNECTED;
-    }
+  if (!connected) {
+    // Give up for good. This is the one disconnect that is wanted: it stops the
+    // driver reconnecting underneath the setup portal, where the station
+    // interface is needed for scanning rather than for joining.
+    WiFi.disconnect();
 
-    if (!connected)
-      WiFi.disconnect();
+    // Only worth saying when there was something to join -- a radar that has
+    // never been set up has not failed at anything.
+    if (!storedSsid.isEmpty())
+      Serial.printf("Could not join %s within %lums, status %d\n",
+                    storedSsid.c_str(), JoinTimeoutMs, WiFi.status());
   }
 
-  // Nothing past here needs them, and neither the password nor the SSID has any
-  // business sitting on the heap for the rest of the run: the driver has its
-  // own copy, and the portal below does not join anything.
+  // Neither the password nor the SSID has any business sitting on the heap for
+  // the rest of the run -- the driver has its own copy of the pair it is using,
+  // and nothing past here joins anything. Wiped rather than just released, so
+  // the password does not linger in whatever the heap hands out next.
+  SecureWipe(const_cast<char*>(storedPassword.c_str()), storedPassword.length());
   storedSsid = String();
   storedPassword = String();
 

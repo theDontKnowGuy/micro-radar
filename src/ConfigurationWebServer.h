@@ -8,6 +8,12 @@
 
 #include "FirmwareUpdater.h"
 
+// The mDNS name the radar answers to, and the address that name resolves to on
+// the LAN. Kept here because the boot screen, the setup portal's "now go here"
+// message and the responder itself all have to agree on one spelling.
+constexpr const char* MdnsHostname = "radar";
+constexpr const char* MdnsAddress = "radar.local";
+
 class ConfigurationWebServer {
 public:
     // Which network the configuration page is being served over. There is one
@@ -27,6 +33,10 @@ private:
     DNSServer dns;
     Mode mode = Mode::Station;
 
+    // AsyncWebServer keeps no accessor for the port it was given, and the mDNS
+    // service record has to advertise the one actually bound.
+    uint16_t port = 80;
+
     std::atomic<bool> restartRequested{false};
 
     // Borrowed, not owned; both live for the lifetime of the program. Only the
@@ -35,7 +45,7 @@ private:
 
 public:
     ConfigurationWebServer() : server(80), prefs() {}
-    ConfigurationWebServer(int port) : server(port), prefs() {}
+    ConfigurationWebServer(int serverPort) : server(serverPort), prefs(), port(serverPort) {}
 
     // Binds port 80 for the rest of the boot. Call this once, in either mode --
     // the radar no longer hands the port between a setup portal and a

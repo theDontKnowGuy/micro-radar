@@ -51,7 +51,7 @@ void Draw(LGFX& tft)
   ProgressBar::DrawOutline(tft, BAR_Y, BAR_TROUGH_COLOR);
 }
 
-void Hold(LGFX& tft, unsigned long startedAt)
+void Hold(LGFX& tft, unsigned long startedAt, bool (*stillWaiting)(), unsigned long maxHoldMs)
 {
   // Repainted only when the whole-percent figure moves, same as the update
   // screen: 100 small fills over seven seconds, not one per pass of the loop.
@@ -68,6 +68,12 @@ void Hold(LGFX& tft, unsigned long startedAt)
 
   // The loop above always stops a percent or two short of the end.
   ProgressBar::DrawFill(tft, BAR_Y, 100, BAR_COLOR);
+
+  // The screen is left exactly as it is, full bar and all, while whatever the
+  // caller is waiting on gets the rest of its time. Cut short the moment it
+  // lands, so a boot onto a router that answers promptly is unaffected.
+  while (stillWaiting() && millis() - startedAt < maxHoldMs)
+    delay(10);
 
   tft.fillScreen(lgfx::color888(0, 0, 0));
   tft.waitDMA();
