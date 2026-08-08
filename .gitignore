@@ -71,3 +71,5 @@ nbproject
 .pio
 .vscode
 build/release/
+build/coredump/
+firmware.zip

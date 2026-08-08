@@ -87,6 +87,7 @@ struct PageValues {
     String altitudeEnabled, altitudeUnit, destinationEnabled, windEnabled;
     String clockEnabled, clockFormat;
     String aircraftMarker, autoUpdate, screenTrim, alignmentTest;
+    String insightsKeyPlaceholder, insightsLabel;
 
     // Wi-Fi section and the mode it is being shown in.
     String setupMode, wifiSsid, wifiPassPlaceholder;
@@ -1054,6 +1055,57 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                     </div>
                 </fieldset>
 
+                <fieldset class="config-section">
+                    <legend>Remote diagnostics</legend>
+                    <p class="section-note">
+                        Off unless a key is entered below. When it is on, this radar sends crash
+                        reports and error messages to
+                        <a href="https://insights.espressif.com"
+                           target="_blank" rel="noopener" class="underline">ESP Insights</a>
+                        so whoever looks after it can see why it misbehaved without taking it
+                        apart. Along with those it reports free memory, uptime, Wi-Fi signal
+                        strength, and this network's name and IP address. It does not send your
+                        Wi-Fi password, your OpenSky credentials, or the location the radar is
+                        centred on. Clear the key to stop all of it.
+                    </p>
+                    <div class="credentials">
+                    <label class="field-row">
+                    <span>Insights auth key:</span>
+                    <input
+                        name="insights-key"
+                        type="password"
+                        autocomplete="off"
+                        spellcheck="false"
+                        placeholder="%INSIGHTS_KEY_PLACEHOLDER%">
+                    </label>
+
+                    <label class="field-row">
+                    <span>Label:</span>
+                    <input
+                        name="insights-label"
+                        autocomplete="off"
+                        maxlength="48"
+                        placeholder="e.g. kitchen shelf"
+                        value='%INSIGHTS_LABEL%'>
+                    </label>
+                    </div>
+                    <p class="section-note">
+                        The label is only there so this radar is recognisable on the dashboard,
+                        which otherwise lists it as %NET_MAC%.
+                    </p>
+
+                    <div class="display-option">
+                        <label class="display-toggle" for="insights-clear">
+                            <span>Turn reporting off and forget the key</span>
+                            <input id="insights-clear" name="insights-clear" type="checkbox">
+                        </label>
+                    </div>
+                    <p class="section-note">
+                        An empty key box means &ldquo;keep the stored key&rdquo;, so this box is how
+                        the key is actually removed. Takes effect on the restart that saving does.
+                    </p>
+                </fieldset>
+
                 <div class="save-row">
                     <input
                         type="submit"
@@ -1673,6 +1725,13 @@ void ConfigurationWebServer::EnsureDefaults() {
     ensureKey("radius", "1.0");
     ensureKey("opensky-id", "");
     ensureKey("opensky-secret", "");
+
+    // Empty means remote diagnostics stay off, which is the only safe default
+    // for a radar that will live in someone else's house -- see Diagnostics.h.
+    // It also keeps the key out of the published firmware image, where it would
+    // be readable by anyone who downloads a release.
+    ensureKey("insights-key", "");
+    ensureKey("insights-label", "");
     ensureKey("geocoder-url", "https://nominatim.openstreetmap.org/search");
     ensureKey("scanline", "true");
     ensureKey("sweep-period", "5");
@@ -1777,8 +1836,18 @@ void ConfigurationWebServer::Initialise(FirmwareUpdater& updater, Mode serveMode
         values.autoUpdate = prefs.getString("auto-update", "true");
         values.screenTrim = EscapeHtmlAttribute(prefs.getString("screen-trim", "0"));
         values.alignmentTest = prefs.getString("alignment-test", "false");
+        const bool hasInsightsKey = !prefs.getString("insights-key", "").isEmpty();
+        values.insightsLabel = EscapeHtmlAttribute(prefs.getString("insights-label", ""));
         const String storedSsid = prefs.getString("wifi-ssid", "");
         prefs.end();
+
+        // Same contract as the OpenSky secret below: the stored key never goes
+        // back to the page, so an empty field on save means "keep it". The
+        // wording doubles as the on/off indicator -- it is the only place the
+        // page can honestly say whether reporting is running.
+        values.insightsKeyPlaceholder = hasInsightsKey
+            ? "Reporting is on - leave blank to keep the stored key"
+            : "Paste a key to turn reporting on";
 
         // Sent as a placeholder, never as a value. A masked value would still
         // have to be told apart from a real one on save, and the previous
@@ -1841,6 +1910,8 @@ void ConfigurationWebServer::Initialise(FirmwareUpdater& updater, Mode serveMode
                 if (var == "RADIUS")         return values.radius;
                 if (var == "OPENSKY_ID")     return values.openskyClientId;
                 if (var == "OPENSKY_SECRET_PLACEHOLDER") return values.openskySecretPlaceholder;
+                if (var == "INSIGHTS_KEY_PLACEHOLDER") return values.insightsKeyPlaceholder;
+                if (var == "INSIGHTS_LABEL")  return values.insightsLabel;
                 if (var == "GEOCODER_URL")   return values.geocoderUrl;
                 if (var == "SCANLINE")       return values.scanlineEnabled == "true" ? "checked" : "";
                 if (var == "SWEEP_2_SELECTED") return values.sweepPeriod == "2" ? "selected" : "";
@@ -2128,6 +2199,27 @@ void ConfigurationWebServer::Initialise(FirmwareUpdater& updater, Mode serveMode
         const String openskySecret = submitted("opensky-secret");
         if (!openskySecret.isEmpty())
             prefs.putString("opensky-secret", openskySecret);
+
+        // Same "empty means keep" contract as the secret above, which leaves no
+        // way to express "stop reporting" -- hence the explicit checkbox. It is
+        // read first so that ticking the box and typing a key in the same
+        // submission ends with the key stored, which is the reading that
+        // matches what the person doing it can see on screen.
+        if (request->hasParam("insights-clear", true))
+            prefs.putString("insights-key", "");
+
+        const String insightsKey = submitted("insights-key");
+        if (!insightsKey.isEmpty())
+            prefs.putString("insights-key", insightsKey);
+
+        // Free text, stored whenever submitted -- including empty, which is how
+        // a label is removed.
+        const auto* insightsLabelParam = request->getParam("insights-label", true);
+        if (insightsLabelParam != nullptr) {
+            String label = insightsLabelParam->value();
+            label.trim();
+            prefs.putString("insights-label", label.substring(0, 48));
+        }
 
         // A name typed into the "other network" box wins over the scan list, so
         // a hidden network can be joined without it ever appearing there. The

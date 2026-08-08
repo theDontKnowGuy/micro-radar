@@ -3,6 +3,7 @@
 
 #include "AircraftManager.h"
 #include "ConfigurationWebServer.h"
+#include "Diagnostics.h"
 #include "FirmwareUpdater.h"
 #include "FirmwareVersion.h"
 #include "HttpRequestManager.h"
@@ -37,8 +38,10 @@ bool alignmentTestEnabled = false;
 void setup()
 {
   Serial.begin(115200);
-  // delay(1000); // avoids immediate serial output being cut off - uncomment if needed
-
+  //delay(5000); // avoids immediate serial output being cut off - uncomment if needed
+  Serial.printf("Starting Micro-Radar by Artisian Electronics, v" FIRMWARE_VERSION "\n");
+  Serial.printf("Reset reason: %d\n", esp_reset_reason());
+  
   // initialise LGFX + screen
   tft.init();
   tft.invertDisplay(DISPLAY_INVERT); // see DisplayConfig.h
@@ -74,7 +77,14 @@ void setup()
   // see PanelTrim, which now turns each run once when it changes rather than
   // once per frame.
   backbuffer.setColorDepth(8);
+
+  // Remembered rather than only printed. This happens before Wi-Fi, so it is
+  // too early for Diagnostics to report anything -- but a unit that cannot
+  // allocate its backbuffer is a broken unit, and that is worth knowing about
+  // from a distance rather than only from a console nobody is watching.
+  bool backbufferFailed = false;
   if (!backbuffer.createSprite(SCREEN_SIZE, SCREEN_SIZE)) {
+    backbufferFailed = true;
     Serial.printf("FATAL: could not allocate %dx%d backbuffer (%d bytes)\n",
                   SCREEN_SIZE, SCREEN_SIZE, SCREEN_SIZE * SCREEN_SIZE);
   }
@@ -100,6 +110,20 @@ void setup()
   // coordinates and applies it when it draws. Asynchronous: the first sync
   // lands a few seconds from here, and the clock stays off screen until it has.
   configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+
+  // As early as the network allows, so that anything going wrong from here on
+  // is reportable. Silent unless an auth key has been stored -- see
+  // Diagnostics.h for why that is the default and what it costs to change it.
+  //
+  // Nothing before this point can be reported: the agent installs its log hook
+  // when it starts, so the panel bring-up and the Wi-Fi join are console-only.
+  // The boot event it sends carries the version and the reset reason, which is
+  // what most of that early stretch would have told you anyway.
+  Diagnostics::Begin(configServer);
+
+  if (backbufferFailed)
+    Diagnostics::Error("backbuffer allocation failed (%d bytes) - display is dead",
+                       SCREEN_SIZE * SCREEN_SIZE);
 
   // begin background server for configuration
   configServer.Initialise(firmwareUpdater, ConfigurationWebServer::Mode::Station);
@@ -152,6 +176,13 @@ void setup()
 
 void loop()
 {
+  // Ahead of everything, including the early returns below: a radar left in
+  // alignment mode still has a network stack to protect, and that path returns
+  // before it would reach anything further down. Reporting is the first thing
+  // to give way when it starts costing more than it is worth -- see
+  // Diagnostics::Poll().
+  Diagnostics::Poll();
+
   // Settings were saved over the web UI. Restart here rather than in the
   // request handler, so no SPI DMA transfer is in flight when the chip resets.
   if (configServer.RestartRequested()) {
@@ -166,8 +197,10 @@ void loop()
   // panel idle.
   if (firmwareUpdater.UpdatePending()) {
     // A firmware download and an OpenSky fetch both want a TLS session, and
-    // this board does not have the contiguous heap for two.
+    // this board does not have the contiguous heap for two. The diagnostics
+    // agent is a third, and stands down for the same reason.
     aircraftManager.SuspendNetworkTask();
+    Diagnostics::PauseForUpdate();
     UpdateScreen::RunFirmwareUpdate(tft, firmwareUpdater);
     return;
   }

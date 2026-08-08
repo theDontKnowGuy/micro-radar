@@ -322,7 +322,8 @@ The web page lets you set:
 - sweep animation and speed;
 - aircraft symbol;
 - center surface-wind readout;
-- speed, altitude, units, and route labels.
+- speed, altitude, units, and route labels;
+- remote diagnostics, off by default — see below.
 
 When the surface-wind display is enabled, it uses an aviation-style readout. For example, `WND 32025G30KT` means wind from 320° at 25 knots, gusting to 30 knots.
 
@@ -339,6 +340,108 @@ apply only to keys that have never been set — an already-configured radar keep
 what it has, and a setting turned off stays off.
 
 An [OpenSky Network](https://opensky-network.org/) account is optional but provides a larger request allowance. Route labels use [ADSBDB](https://www.adsbdb.com/), and center surface wind uses [Open-Meteo](https://open-meteo.com/). Place search uses [Nominatim](https://nominatim.org/), and approximate location uses [IPWhoIs](https://ipwhois.io/).
+
+## Remote diagnostics
+
+A radar on your own desk can be debugged over the serial monitor, and a radar
+that has panicked can have its coredump read with `scripts/pull-coredump.sh`.
+Both need a USB cable. For a unit you have given to someone else, this is the
+replacement: the radar reports on itself over the internet.
+
+It is **off until you turn it on**, and it stays off unless someone enters a key
+on the configuration page. That is deliberate — the firmware images published on
+GitHub are public, so a key compiled into one would be readable by anyone who
+downloaded a release, and these radars sit in other people's homes.
+
+### Turning it on
+
+1. Sign in at [insights.espressif.com](https://insights.espressif.com) and
+   create an auth key.
+2. Open the radar's configuration page, find **Remote diagnostics**, paste the
+   key in, and give the unit a label — "kitchen shelf", "Dan's" — so it is
+   recognisable on the dashboard. Without one it is listed by MAC address.
+3. Save. The radar restarts and the first report arrives within a minute or two.
+
+To turn it off again, tick **Turn reporting off and forget the key** and save.
+An empty key box means "keep the stored key", so that box is the only way to
+actually remove it.
+
+### What you get
+
+Per device, on a web dashboard: crashes with the exception cause and a
+backtrace, error and warning messages, free heap, Wi-Fi signal strength, IP,
+SSID and uptime over time.
+
+The crash reporting works because a panic already writes a coredump to flash —
+that has always happened, and the only thing missing was anyone to read it. What
+the agent sends is a *summary* of that dump: the program counter, the registers
+and the backtrace. It is enough to identify the line that died, which is most of
+what you need. It is not the full dump with every task's stack, so a crash that
+turns out to need one still needs the board in your hand. The larger design that
+would fix that is in [docs/remote-logging-design.md](docs/remote-logging-design.md).
+
+Nothing before the Wi-Fi join can be reported — the agent installs its log hook
+when it starts, so the panel bring-up and the join itself are console-only. The
+boot event carries the firmware version and the reset reason, which covers the
+useful part of that stretch.
+
+### What it sends, and what it does not
+
+Sent: crash reports, anything logged through `Diagnostics::Warn/Error/Event`,
+free memory, uptime, Wi-Fi RSSI, and the network's SSID and IP address.
+
+Not sent: the Wi-Fi password, the OpenSky client secret, or the coordinates the
+radar is centred on.
+
+**Tell whoever has the radar before you turn this on.** The SSID and IP are
+theirs, not yours, and the configuration page states plainly what is collected so
+they can read it themselves.
+
+### Logging from firmware code
+
+`Serial.print` still goes to the console and is never collected — the agent taps
+the IDF's logging system, which `Serial` does not go through. To have something
+reach the dashboard, use the facade in `src/Diagnostics.h`:
+
+```cpp
+Diagnostics::Event("update", "installed %s", version.c_str());
+Diagnostics::Warn("OpenSky returned %d", statusCode);
+Diagnostics::Error("token refresh failed");
+```
+
+`Begin()` also points the IDF's own log output at `Serial`, which is new — Wi-Fi
+association failures and mbedTLS errors have always gone to UART0, a pair of pins
+with nothing attached. They now appear on the USB console whether or not
+reporting is enabled.
+
+### When it will not connect
+
+```text
+E (145353) tport_https: API response status = 403
+```
+
+403 is the Insights API rejecting the auth key. Check it against the dashboard
+and re-enter it; a partial paste looks exactly like this.
+
+What that error does *next* is the part worth knowing about. The transport
+retries several times a second rather than at its reporting interval, and every
+retry is a fresh TLS handshake — which this board does not have the contiguous
+heap for. The second symptom follows within seconds:
+
+```text
+E (148843) esp-tls-mbedtls: mbedtls_ssl_setup returned -0x7F00
+```
+
+That is `MBEDTLS_ERR_SSL_ALLOC_FAILED`, and it lands in whichever component
+asked for a socket second — the aircraft fetch, or the firmware updater. A
+reporting channel that cannot report is not worth breaking the radar for, so
+`Diagnostics::Poll()` shuts the agent down after twenty transport errors inside
+a minute. It stays off until the next restart, and says so on the console.
+
+### Cost
+
+About 70 KB of flash and 2 KB of RAM, measured against the same build without
+it. The app slot is 3.3 MB and was 41% full before, so there is plenty of room.
 
 ## Enclosure files
 

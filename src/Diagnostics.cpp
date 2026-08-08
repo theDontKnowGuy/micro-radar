@@ -1,0 +1,376 @@
+// Raised before esp_log.h so ESP_LOGW below is not compiled out.
+//
+// The Arduino core's sdkconfig sets CONFIG_LOG_MAXIMUM_LEVEL=1 (ERROR), which
+// is a compile-time ceiling: ESP_LOGW would expand to nothing everywhere. Every
+// warning in this firmware funnels through Warn() in this one file, so lifting
+// the ceiling here lifts it for all of them without touching a build flag that
+// would also change how the bundled libraries compile.
+#define LOG_LOCAL_LEVEL ESP_LOG_VERBOSE
+
+#include "Diagnostics.h"
+
+#include <atomic>
+#include <cstdarg>
+#include <cstring>
+
+#include <Preferences.h>
+#include <esp_log.h>
+#include <esp_system.h>
+#include <sdkconfig.h>
+
+#include "ConfigurationWebServer.h"
+#include "FirmwareVersion.h"
+
+#ifdef CONFIG_ESP_INSIGHTS_ENABLED
+#include <Insights.h>
+#endif
+
+namespace {
+
+// One tag for the whole firmware. The dashboard groups by tag, and splitting
+// per module would scatter a single crash's story across several groups.
+constexpr const char* TAG = "radar";
+
+// Long enough for any message here; anything longer is truncated rather than
+// allowed to cost a heap allocation on a path that runs during failures, which
+// is exactly when the heap is the thing that has gone wrong.
+constexpr size_t MessageLimit = 256;
+
+bool started = false;
+String nodeId;
+
+// These two outlive Begin() on purpose, and the reason is not style.
+//
+// esp_insights_init() does not copy the auth key. It keeps the pointer:
+//
+//     g_default_insights_transport_https.userdata = (void *)config->auth_key;
+//
+// so a key handed over as a local String's c_str() is freed heap by the time
+// the first report goes out. The transport then authenticates with whatever
+// now occupies those bytes and the server answers 403 -- forever, and at the
+// transport's retry rate rather than its reporting interval, which is how a
+// mistake this small turns into the flood that TransportIsFlooding() below
+// exists to stop. The same caution applies to the label: it is handed to the
+// diagnostics store as a bare pointer.
+String storedAuthKey;
+String storedLabel;
+
+// Bumped by the log hook whenever the transport complains, and read by Poll().
+//
+// A counter rather than a flag because occasional failures are normal -- a
+// router reboots, a DNS lookup times out -- and shutting down over one would
+// make the feature useless. What is not normal is a burst, and a burst is the
+// dangerous shape: every retry is a TLS handshake, and this board does not have
+// the contiguous heap to spare for a stream of them. The symptom is
+// mbedtls_ssl_setup returning -0x7F00 (MBEDTLS_ERR_SSL_ALLOC_FAILED), at which
+// point the aircraft fetch and the firmware updater are being starved by the
+// thing that is only supposed to be watching them.
+std::atomic<uint32_t> transportErrors{0};
+std::atomic<unsigned long> transportWindowStartedAt{0};
+
+// Raised by the log hook, lowered by Poll() when it shuts the agent down.
+std::atomic<bool> transportFlooded{false};
+
+// A burst is this many transport errors inside this window. Chosen against an
+// observed failure: a rejected key produced errors roughly five times a second,
+// so twenty in a minute is far above anything intermittent and is reached in
+// seconds by a genuine storm.
+constexpr uint32_t TransportErrorBurst = 20;
+constexpr unsigned long TransportErrorWindowMs = 60000;
+
+// Where the IDF's logs go once Begin() has run.
+//
+// Without this they go to stdout, which on this board is UART0 -- physical pins
+// nobody has a wire on. Serial is USB CDC (ARDUINO_USB_CDC_ON_BOOT=1), so the
+// mbedTLS and Wi-Fi driver errors that would explain a misbehaving unit have
+// been going out a port that does not exist on the case.
+//
+// The `if (Serial)` matters more than it looks. HWCDC::write blocks until its
+// transmit timeout when no host is draining the endpoint, and a deployed radar
+// has no host at all -- so without the guard, every IDF log line would stall
+// whichever task emitted it for the timeout. HWCDC's bool conversion is false
+// when nothing is connected, which is the common case in the field and the
+// whole reason this module exists.
+// Counts a transport complaint, and reports whether they are now arriving fast
+// enough to be a storm rather than weather.
+//
+// Reading the agent's own log output is not the way anyone would choose to
+// learn this. The header declares INSIGHTS_EVENT_TRANSPORT_SEND_FAILED for
+// exactly this purpose, but the HTTPS transport bundled with this core never
+// posts it -- libesp_insights.a references esp_event_handler_register and
+// nothing that emits, so the event is a promise the build does not keep. The
+// log line is what the failure actually produces, and this module already sits
+// on every log line for other reasons, so it costs nothing to notice.
+//
+// If Espressif renames the tag in a later core, this stops tripping and the
+// behaviour falls back to what it was before -- noisy, not broken.
+bool TransportIsFlooding(const char* line)
+{
+    if (std::strstr(line, "tport_https") == nullptr)
+        return false;
+
+    const unsigned long now = millis();
+    const unsigned long windowStart = transportWindowStartedAt.load();
+
+    if (windowStart == 0 || now - windowStart > TransportErrorWindowMs) {
+        transportWindowStartedAt.store(now);
+        transportErrors.store(1);
+        return false;
+    }
+
+    return transportErrors.fetch_add(1) + 1 >= TransportErrorBurst;
+}
+
+int WriteLogToSerial(const char* format, va_list args)
+{
+    char buffer[MessageLimit];
+    const int length = vsnprintf(buffer, sizeof(buffer), format, args);
+    if (length <= 0)
+        return length;
+
+    // Noticed here rather than acted on here: this runs on the agent's own task,
+    // inside its logging call, and tearing the agent down from there would be
+    // pulling the floor out from under the caller. Poll() does it from the
+    // render loop instead -- the same arrangement RestartRequested() and
+    // UpdatePending() already use for the same reason.
+    if (TransportIsFlooding(buffer))
+        transportFlooded.store(true);
+
+    if (Serial) {
+        const size_t written = (static_cast<size_t>(length) < sizeof(buffer))
+            ? static_cast<size_t>(length)
+            : sizeof(buffer) - 1;
+        Serial.write(reinterpret_cast<const uint8_t*>(buffer), written);
+    }
+
+    return length;
+}
+
+// Turns a reset reason into something readable on a dashboard. The numeric
+// value is what esp_reset_reason() gives and what the current boot log prints;
+// six weeks later, looking at a crash from someone else's house, "TASK_WDT" is
+// worth considerably more than "6".
+// Counts boots, in its own NVS namespace so it cannot collide with a settings
+// key. One small write per boot, which NVS wear levelling will outlive by
+// several lifetimes of the device.
+//
+// It earns its place twice. It makes each boot event distinct -- "v1.7.2,
+// reset: software" is identical every time, which is indistinguishable from one
+// event on a dashboard that groups by text, and that ambiguity is currently in
+// the way of knowing whether reports are arriving at all. And a reboot count is
+// the number you actually want from a radar in someone else's house: a unit on
+// boot 400 is in a loop, whatever its last message said.
+uint32_t RecordBoot()
+{
+    Preferences diagPrefs;
+    if (!diagPrefs.begin("diag", false))
+        return 0;
+
+    const uint32_t count = diagPrefs.getUInt("boots", 0) + 1;
+    diagPrefs.putUInt("boots", count);
+    diagPrefs.end();
+    return count;
+}
+
+const char* ResetReasonName(esp_reset_reason_t reason)
+{
+    switch (reason) {
+        case ESP_RST_POWERON:  return "power-on";
+        case ESP_RST_EXT:      return "external-pin";
+        case ESP_RST_SW:       return "software";
+        case ESP_RST_PANIC:    return "panic";
+        case ESP_RST_INT_WDT:  return "interrupt-watchdog";
+        case ESP_RST_TASK_WDT: return "task-watchdog";
+        case ESP_RST_WDT:      return "other-watchdog";
+        case ESP_RST_DEEPSLEEP:return "deep-sleep-wake";
+        case ESP_RST_BROWNOUT: return "brownout";
+        case ESP_RST_SDIO:     return "sdio";
+        default:               return "unknown";
+    }
+}
+
+} // namespace
+
+namespace Diagnostics {
+
+void Begin(ConfigurationWebServer& config)
+{
+    // Unconditional, and ahead of the enabled check: bringing the IDF's own
+    // logs to the USB console is worth having on a board on a desk with no
+    // reporting configured at all.
+    esp_log_set_vprintf(WriteLogToSerial);
+    esp_log_level_set(TAG, ESP_LOG_VERBOSE);
+
+    const esp_reset_reason_t resetReason = esp_reset_reason();
+
+#ifdef CONFIG_ESP_INSIGHTS_ENABLED
+    storedAuthKey = config.GetStoredString("insights-key");
+    storedAuthKey.trim();
+
+    if (storedAuthKey.isEmpty()) {
+        Serial.println("Diagnostics: no auth key stored - remote reporting is off");
+        return;
+    }
+
+    // Large buffers into PSRAM. The 360x360 backbuffer already showed that this
+    // board's contiguous SRAM is the scarce thing, and the agent's buffers have
+    // no reason to compete for it.
+    const bool useExternalRam = ESP.getPsramSize() > 0;
+
+    // Node id left null so the agent uses the Wi-Fi MAC, which is unique
+    // without anyone having to keep a list. The human label is attached below
+    // as a variable instead -- two friends both typing "living room" would
+    // otherwise merge into one device on the dashboard.
+    if (!Insights.begin(storedAuthKey.c_str(), nullptr, 0xFFFFFFFF, useExternalRam)) {
+        // Deliberately not an Error(): the reporting channel is what just
+        // failed, so sending this through it would go nowhere.
+        Serial.println("Diagnostics: agent failed to start - check the auth key");
+        return;
+    }
+
+    started = true;
+    nodeId = Insights.nodeID();
+
+    Serial.printf("Diagnostics: reporting as %s\n", nodeId.c_str());
+
+    // Shown beside each device on the dashboard. Without it, twenty radars are
+    // twenty MAC addresses and no way to tell whose is crashing.
+    storedLabel = config.GetStoredString("insights-label");
+    storedLabel.trim();
+    if (!storedLabel.isEmpty()) {
+        Insights.variables.addString("radar", "label", "Label", "device");
+        Insights.variables.setString("label", storedLabel.c_str());
+    }
+
+    // So a crash can be read against the build it came from. The dashboard
+    // groups by version, which is what turns "it crashes sometimes" into "it
+    // started crashing in 1.7.0".
+    Insights.variables.addString("radar", "fw", "Firmware", "device");
+    Insights.variables.setString("fw", FIRMWARE_VERSION);
+
+    // The first thing every boot reports, and the one that makes a crash loop
+    // legible: a device whose events are a column of "panic" is telling a very
+    // different story from one that reads "power-on".
+    Event("boot", "#%u v%s, reset: %s",
+          RecordBoot(), FIRMWARE_VERSION, ResetReasonName(resetReason));
+
+    // Pushed now rather than left to the agent's own schedule, which is 60 to
+    // 240 seconds away. Waiting four minutes to find out whether a key works is
+    // the difference between a setting you can check and one you have to
+    // believe in.
+    //
+    // The return value only says the send was queued -- esp_insights_send_data()
+    // hands the work to the rmaker queue task and comes straight back, so the
+    // HTTP result is not knowable here. It arrives on the console a moment
+    // later as either silence or a tport_https line, which is why this is worth
+    // doing at all: it moves that answer to within a second or two of boot.
+    Insights.send();
+#else
+    (void)config;
+    Serial.println("Diagnostics: ESP Insights is not compiled into this core");
+#endif
+}
+
+bool Enabled()
+{
+    return started;
+}
+
+void Poll()
+{
+#ifdef CONFIG_ESP_INSIGHTS_ENABLED
+    if (!started || !transportFlooded.load())
+        return;
+
+    transportFlooded.store(false);
+
+    // Straight to Serial. Error() would route this through the log hook that
+    // just tripped, and a shutdown notice is not worth another lap through the
+    // machinery that is being shut down.
+    Serial.println("Diagnostics: transport failing repeatedly - stopping the agent");
+    Serial.println("Diagnostics: check the auth key on the configuration page, then restart");
+
+    Insights.end();
+    started = false;
+#endif
+}
+
+String NodeId()
+{
+    return nodeId;
+}
+
+void PauseForUpdate()
+{
+#ifdef CONFIG_ESP_INSIGHTS_ENABLED
+    if (!started)
+        return;
+
+    // A last word before going quiet. Sent synchronously-ish rather than left
+    // to the next scheduled post, because the next scheduled post will not
+    // happen -- this is followed by a flash rewrite and a reboot.
+    Event("update", "installing, going quiet");
+    Insights.send();
+    Insights.end();
+    started = false;
+#endif
+}
+
+void Event(const char* tag, const char* format, ...)
+{
+    char message[MessageLimit];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(message, sizeof(message), format, args);
+    va_end(args);
+
+    // Always on the console, whether or not anything is being reported.
+    Serial.printf("[%s] %s\n", tag, message);
+
+#ifdef CONFIG_ESP_INSIGHTS_ENABLED
+    if (!started)
+        return;
+
+    // "%s" rather than passing the caller's format through: the text has
+    // already been expanded, and handing an arbitrary string to a printf-style
+    // API as its format is how a stray '%' in a callsign or an SSID turns a log
+    // call into a read of whatever is next on the stack.
+    //
+    // The return is checked because the interesting failure here is silent. The
+    // agent buffers into RTC memory -- 6KB of it, and this core is built with
+    // CONFIG_RTC_STORE_OVERWRITE_NON_CRITICAL_DATA off, so a full buffer drops
+    // new data rather than discarding old. The buffer is only emptied by a
+    // successful upload and it survives a software reset, so a spell of failing
+    // uploads can leave a device that starts cleanly, reports no errors, and
+    // quietly records nothing. Without this line that state is indistinguishable
+    // from working.
+    const esp_err_t stored = esp_diag_log_event(tag, "%s", message);
+    if (stored != ESP_OK)
+        Serial.printf("Diagnostics: event dropped (0x%x) - buffer full? power-cycle to clear\n",
+                      stored);
+#endif
+}
+
+void Warn(const char* format, ...)
+{
+    char message[MessageLimit];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(message, sizeof(message), format, args);
+    va_end(args);
+
+    ESP_LOGW(TAG, "%s", message);
+}
+
+void Error(const char* format, ...)
+{
+    char message[MessageLimit];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(message, sizeof(message), format, args);
+    va_end(args);
+
+    ESP_LOGE(TAG, "%s", message);
+}
+
+} // namespace Diagnostics
