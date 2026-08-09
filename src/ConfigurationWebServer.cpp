@@ -180,7 +180,7 @@ static const char CONFIG_HTML[] PROGMEM = R"(
 <html lang="en">
     <head>
         <meta name="viewport" content="width=device-width, initial-scale=1">
-        <title>Configure Micro Radar</title>
+        <title>Micro Radar Configuration</title>
         <link rel="icon" type="image/png" href="/logo.png">
         <style>
             :root {
@@ -204,7 +204,7 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                    so it is offset from these two rather than from a measured
                    constant that would drift the moment the legend changes
                    size. Legend height is pinned for the same reason. */
-                --legend-height: 2rem;
+                --legend-height: 4rem;
                 --mark-size: 88px;
             }
             * {
@@ -224,7 +224,7 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                     linear-gradient(145deg, rgb(4 12 10), rgb(8 20 17));
                 color: var(--text);
                 font-family:
-                    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+                    ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
                     "Segoe UI", sans-serif;
                 font-size: 14px;
                 line-height: 1.45;
@@ -317,9 +317,9 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                 display: inline-flex;
                 align-items: center;
                 height: var(--legend-height);
-                padding: 0 .65rem;
+                padding: 20px 3rem;
                 border: 1px solid var(--line);
-                border-radius: 999px;
+                border-radius: 1.4rem;
                 background: rgb(8 22 18);
                 color: var(--green);
                 font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -889,7 +889,7 @@ static const char CONFIG_HTML[] PROGMEM = R"(
     <body data-net-mode="%NET_MODE%">
       <div class="config-shell">
         <fieldset class="config-panel">
-            <legend>Configure Micro Radar</legend>
+            <legend>Micro Radar Configuration</legend>
 
             <div class="tab-bar" role="tablist" aria-label="Configuration sections" %TABS_HIDDEN%>
                 <button type="button" class="tab-button" role="tab" data-tab="radar"
