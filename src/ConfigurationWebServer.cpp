@@ -10,6 +10,7 @@
 
 #include "DisplayConfig.h"
 #include "FirmwareVersion.h"
+#include "WebLogo.h"
 
 // The radar answers every name on the setup hotspot, which is what makes a
 // phone open the page by itself instead of reporting no internet.
@@ -81,7 +82,7 @@ static String FormatUptime(unsigned long milliseconds)
 // processor runs later, while the response is being written out, so it must not
 // be the thing that opens Preferences or asks the Wi-Fi driver anything.
 struct PageValues {
-    String latitude, longitude, locationName, radius;
+    String latitude, longitude, locationName, radius, distanceUnit;
     String openskyClientId, openskySecretPlaceholder, geocoderUrl;
     String scanlineEnabled, sweepPeriod, speedEnabled, speedUnit;
     String altitudeEnabled, altitudeUnit, destinationEnabled, windEnabled;
@@ -93,6 +94,10 @@ struct PageValues {
     String setupMode, wifiSsid, wifiPassPlaceholder;
     String networkNote, networkOpen, networkSummary, forgetHidden, saveLabel;
     String netIp, netRssi, netMac, netUptime, netHeap;
+
+    // Tab strip. Hidden on the setup hotspot, where the network is the only
+    // thing worth setting and the other two tabs have nothing to offer yet.
+    String tabsHidden, openskyHidden;
 };
 
 // The radar has no login, so anything on the LAN can already reconfigure it on
@@ -176,6 +181,7 @@ static const char CONFIG_HTML[] PROGMEM = R"(
     <head>
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <title>Configure Micro Radar</title>
+        <link rel="icon" type="image/png" href="/logo.png">
         <style>
             :root {
                 color-scheme: dark;
@@ -190,6 +196,16 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                 --muted: rgb(110 170 139);
                 --green: rgb(74 222 128);
                 --green-strong: rgb(34 197 94);
+
+                /* A fieldset paints its top border through the middle of its
+                   legend rather than along the top of its box, so the panel's
+                   visible top line is half a legend below where the geometry
+                   APIs put the panel. The corner mark has to sit on that line,
+                   so it is offset from these two rather than from a measured
+                   constant that would drift the moment the legend changes
+                   size. Legend height is pinned for the same reason. */
+                --legend-height: 2rem;
+                --mark-size: 88px;
             }
             * {
                 box-sizing: border-box;
@@ -200,7 +216,9 @@ static const char CONFIG_HTML[] PROGMEM = R"(
             body {
                 margin: 0;
                 min-height: 100vh;
-                padding: 1.5rem 0;
+                /* Top padding has to clear the half of the corner mark that
+                   sits above the panel, or it is cut off by the viewport. */
+                padding: 2.6rem 0 1.5rem;
                 background:
                     radial-gradient(circle at 140px 70px, rgb(34 197 94 / .11), transparent 430px),
                     linear-gradient(145deg, rgb(4 12 10), rgb(8 20 17));
@@ -270,10 +288,23 @@ static const char CONFIG_HTML[] PROGMEM = R"(
             p {
                 margin-top: 0;
             }
-            .config-panel {
+            /* Exists only to be the corner mark's containing block. The panel
+               itself cannot be: it is a fieldset, and a fieldset's absolutely
+               positioned children measure top:0 from below the legend rather
+               than from the border, which drops the mark by exactly the
+               legend's height. */
+            .config-shell {
+                position: relative;
                 width: min(1040px, calc(100vw - 2rem));
                 margin: 0 auto;
-                padding: 1.35rem;
+            }
+            .config-panel {
+                width: auto;
+                margin: 0;
+                /* Top padding clears the half of the corner mark that hangs
+                   inside the panel; it is positioned out of flow, so nothing
+                   else moves down to make room for it. */
+                padding: 3.2rem 1.35rem 1.35rem;
                 border: 1px solid var(--line);
                 border-radius: 1.4rem;
                 background: rgb(8 22 18 / .94);
@@ -282,7 +313,11 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                     inset 0 1px rgb(255 255 255 / .035);
             }
             .config-panel > legend {
-                padding: .15rem .65rem;
+                box-sizing: border-box;
+                display: inline-flex;
+                align-items: center;
+                height: var(--legend-height);
+                padding: 0 .65rem;
                 border: 1px solid var(--line);
                 border-radius: 999px;
                 background: rgb(8 22 18);
@@ -292,10 +327,31 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                 font-weight: 650;
                 letter-spacing: .025em;
             }
-            .config-intro {
-                margin: .1rem 0 .2rem;
-                color: var(--muted);
-                font-size: .84rem;
+            /* Centred on the panel's painted top border, on the corner
+               opposite the legend, so half the mark sits above the line. The
+               offset lands its middle on the legend's middle, which is where
+               that border is drawn -- see the note on --legend-height. Written
+               as a calc rather than a translate because a CSS percentage
+               cannot appear anywhere in this page: see the note above
+               CONFIG_HTML.
+
+               The disc is what hides the border line. The ring is open in the
+               middle, so without it the line would run straight through the
+               wordmark. The artwork is blue and the rest of the page is green
+               phosphor -- rather than recolour someone's logo, the halo around
+               it is the page's own accent. */
+            .masthead-mark {
+                position: absolute;
+                top: calc((var(--legend-height) - var(--mark-size)) / 2);
+                right: 1.6rem;
+                display: block;
+                width: var(--mark-size);
+                height: var(--mark-size);
+                border-radius: 50rem;
+                background: rgb(7 19 16);
+                box-shadow:
+                    0 0 22px rgb(56 130 246 / .22),
+                    0 0 46px rgb(34 197 94 / .07);
             }
             .firmware-footer {
                 margin: 1.1rem 0 0;
@@ -343,10 +399,50 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                 text-decoration: none;
                 cursor: default;
             }
+            .tab-bar {
+                display: flex;
+                gap: .4rem;
+                margin: .75rem 0 1rem;
+                padding: .3rem;
+                border: 1px solid var(--line);
+                border-radius: .9rem;
+                background: rgb(5 20 15 / .6);
+            }
+            .tab-bar[hidden] {
+                display: none;
+            }
+            .tab-button {
+                flex: 1;
+                border: 1px solid transparent;
+                border-radius: .7rem;
+                background: none;
+                color: var(--muted);
+                font-weight: 650;
+                padding: .55rem .5rem;
+            }
+            .tab-button:hover {
+                border-color: var(--line);
+                background: rgb(13 39 29 / .6);
+                transform: none;
+            }
+            .tab-button[aria-selected="true"] {
+                border-color: var(--line-strong);
+                background: rgb(20 83 45 / .55);
+                color: var(--green);
+            }
             .config-form {
                 display: flex;
                 flex-direction: column;
                 gap: 1rem;
+            }
+            .tab-panel {
+                display: flex;
+                flex-direction: column;
+                gap: 1rem;
+            }
+            /* display: flex above would otherwise beat the hidden attribute. */
+            .tab-panel[hidden] {
+                display: none;
             }
             .config-section {
                 min-width: 0;
@@ -564,6 +660,68 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                 gap: .8rem;
                 flex-wrap: wrap;
             }
+            /* The generic input rule above dresses every non-checkbox input as
+               a text box, which draws a border and padding around a slider. */
+            input[type="range"] {
+                width: auto;
+                border: 0;
+                padding: 0;
+                background: none;
+                accent-color: var(--green);
+            }
+            input[type="range"]:hover {
+                background: none;
+            }
+            .radius-row {
+                display: grid;
+                grid-template-columns: minmax(0, 1fr) auto;
+                align-items: center;
+                gap: .9rem;
+            }
+            .radius-readout {
+                display: flex;
+                align-items: center;
+                gap: .6rem;
+                color: var(--green);
+                font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+                font-weight: 650;
+                white-space: nowrap;
+            }
+            .radius-readout select {
+                padding: .4rem .5rem;
+            }
+            .danger-zone {
+                border-color: rgb(248 113 113 / .4);
+            }
+            .danger-zone > legend {
+                color: rgb(252 165 165);
+            }
+            .danger-action {
+                display: flex;
+                align-items: center;
+                gap: 1rem;
+                flex-wrap: wrap;
+                margin-top: .75rem;
+            }
+            .danger-button {
+                border-color: rgb(248 113 113 / .6);
+                background: rgb(127 29 29 / .45);
+                color: rgb(254 202 202);
+            }
+            .danger-button:hover {
+                border-color: rgb(248 113 113);
+                background: rgb(153 27 27 / .62);
+            }
+            .danger-button:disabled {
+                opacity: .45;
+                cursor: not-allowed;
+                transform: none;
+            }
+            .danger-button:disabled:hover {
+                border-color: rgb(248 113 113 / .6);
+                background: rgb(127 29 29 / .45);
+                transform: none;
+            }
             .place-search {
                 display: grid;
                 grid-template-columns: 1fr auto;
@@ -594,11 +752,28 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                 width: auto;
                 display: block;
             }
+            /* Sticky because Save applies to all three tabs at once: it has to
+               stay in view from wherever the last change was made, or the tab
+               that is showing reads as the only thing being saved. */
             .save-row {
+                position: sticky;
+                bottom: 0;
+                z-index: 2;
                 display: flex;
                 align-items: center;
                 gap: 1rem;
                 min-height: 3rem;
+                margin-top: .25rem;
+                padding: .75rem 0;
+                border-top: 1px solid var(--line);
+                background: rgb(8 22 18 / .97);
+            }
+            .save-state {
+                color: var(--muted);
+                font-size: .8rem;
+            }
+            .save-state.is-dirty {
+                color: rgb(250 204 21);
             }
             .save-button {
                 border: 1px solid var(--green);
@@ -637,7 +812,7 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                 text-decoration: underline;
             }
             @media (max-width: 820px) {
-                .config-panel {
+                .config-shell {
                     width: min(1040px, calc(100vw - 1.25rem));
                 }
                 .display-options {
@@ -649,11 +824,13 @@ static const char CONFIG_HTML[] PROGMEM = R"(
             }
             @media (max-width: 520px) {
                 body {
-                    padding: .5rem 0;
+                    padding: 1.6rem 0 .5rem;
+                }
+                .config-shell {
+                    width: min(1040px, calc(100vw - .75rem));
                 }
                 .config-panel {
-                    width: min(1040px, calc(100vw - .75rem));
-                    padding: .8rem;
+                    padding: 2.3rem .8rem .8rem;
                     border-radius: 1rem;
                 }
                 .config-section {
@@ -688,6 +865,19 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                 .display-option:not(.display-option-select) {
                     gap: .55rem;
                 }
+                :root {
+                    --mark-size: 58px;
+                }
+                .masthead-mark {
+                    right: .9rem;
+                }
+                .tab-button {
+                    padding: .55rem .25rem;
+                    font-size: .9rem;
+                }
+                .radius-row {
+                    grid-template-columns: minmax(0, 1fr);
+                }
                 .save-row {
                     align-items: flex-start;
                     flex-direction: column;
@@ -697,414 +887,553 @@ static const char CONFIG_HTML[] PROGMEM = R"(
         </style>
     </head>
     <body data-net-mode="%NET_MODE%">
+      <div class="config-shell">
         <fieldset class="config-panel">
             <legend>Configure Micro Radar</legend>
 
-            <p class="config-intro">Set the network, radar coverage, aircraft data, and display preferences.</p>
+            <div class="tab-bar" role="tablist" aria-label="Configuration sections" %TABS_HIDDEN%>
+                <button type="button" class="tab-button" role="tab" data-tab="radar"
+                        id="tab-radar" aria-controls="panel-radar" aria-selected="true">Radar</button>
+                <button type="button" class="tab-button" role="tab" data-tab="setup"
+                        id="tab-setup" aria-controls="panel-setup" aria-selected="false">Setup</button>
+                <button type="button" class="tab-button" role="tab" data-tab="advanced"
+                        id="tab-advanced" aria-controls="panel-advanced" aria-selected="false">Advanced</button>
+            </div>
+
+            <!--
+                One form across all three tabs, and one Save. The tabs hide their
+                panels with the hidden attribute rather than removing them,
+                because /save reads every checkbox as "present means on" -- a
+                panel taken out of the document would submit as a row of
+                switched-off settings. Nothing here may be disabled for the same
+                reason, other than the unit selects that already follow their
+                own toggle.
+            -->
             <form id="cfg" action="/save" method="POST" class="config-form">
 
-                <fieldset class="config-section">
-                    <legend>Wi-Fi network</legend>
-                    <p class="section-note">%NETWORK_NOTE%</p>
+                <div class="tab-panel" id="panel-radar" data-panel="radar"
+                     role="tabpanel" aria-labelledby="tab-radar">
 
-                    <details class="network-details" %NETWORK_OPEN%>
-                        <summary>%NETWORK_SUMMARY%</summary>
-                        <div class="network-grid mt-3">
-                            <div class="ssid-row">
-                                <select
-                                    id="wifi-ssid"
-                                    name="wifi-ssid"
-                                    data-current="%WIFI_SSID%"
-                                    aria-label="Available networks">
-                                    <option value="">Looking for networks...</option>
-                                </select>
-                                <button
-                                    id="rescan-wifi"
-                                    type="button">
-                                    Rescan
-                                </button>
-                            </div>
-
-                            <label class="field-row" id="wifi-manual-row" hidden>
-                                <span>Network name:</span>
-                                <input
-                                    id="wifi-ssid-manual"
-                                    name="wifi-ssid-manual"
-                                    maxlength="32"
-                                    autocomplete="off"
-                                    spellcheck="false"
-                                    disabled
-                                    placeholder="Hidden or out-of-range network name">
+                    <fieldset class="config-section">
+                        <legend>Clock</legend>
+                        <div class="display-option">
+                            <label class="display-toggle" for="clock">
+                                <span>Show local time</span>
+                                <input id="clock" name="clock" type="checkbox" %CLOCK%>
                             </label>
-
-                            <label class="field-row">
-                                <span>Password:</span>
-                                <input
-                                    id="wifi-pass"
-                                    name="wifi-pass"
-                                    type="password"
-                                    maxlength="63"
-                                    autocomplete="off"
-                                    spellcheck="false"
-                                    placeholder="%WIFI_PASS_PLACEHOLDER%">
-                            </label>
-
-                            <div class="text-xs">
-                                The radar joins 2.4 GHz networks only. Leave the password blank for an
-                                open network, or to keep the one already stored. Pick "Other network"
-                                from the list to type a hidden network's name.
-                            </div>
-                            <div id="wifi-result" class="text-sm" aria-live="polite"></div>
-
-                            <dl class="network-diagnostics">
-                                <dt>Address</dt><dd>%NET_IP%</dd>
-                                <dt>Signal</dt><dd>%NET_RSSI%</dd>
-                                <dt>MAC</dt><dd>%NET_MAC%</dd>
-                                <dt>Uptime</dt><dd>%NET_UPTIME%</dd>
-                                <dt>Free memory</dt><dd>%NET_HEAP%</dd>
-                            </dl>
+                            <select id="clock-format" name="clock-format" aria-label="Clock format">
+                                <option value="24h" %CLOCK_24H_SELECTED%>24-hour</option>
+                                <option value="12h" %CLOCK_12H_SELECTED%>AM/PM</option>
+                            </select>
                         </div>
-                    </details>
+                    </fieldset>
 
-                    <div class="network-actions">
-                        <button type="button" id="forget-wifi" class="link-button" %FORGET_HIDDEN%>
-                            Forget this network
-                        </button>
-                        <button type="button" id="restart-radar" class="link-button">Restart radar</button>
-                        <span id="network-action-result" class="text-sm" aria-live="polite"></span>
-                    </div>
-                </fieldset>
+                    <fieldset class="config-section">
+                        <legend>Location</legend>
+                        <p class="section-note">
+                            Where the radar is centred. Everything on the display is drawn
+                            relative to this point.
+                        </p>
+                        <div class="coordinate-grid">
+                        <label class="field-row">
+                            <span>Latitude:</span>
+                            <input
+                                name="latitude"
+                                id="latitude"
+                                type="number"
+                                min="-90"
+                                step="0.000001"
+                                max="90"
+                                value='%LATITUDE%'>
+                        </label>
 
-                <fieldset class="config-section">
-                    <legend>Radar coverage</legend>
-                    <div class="coordinate-grid">
-                    <label class="field-row">
-                        <span>Latitude:</span>
-                        <input
-                            name="latitude"
-                            id="latitude"
-                            type="number"
-                            min="-90"
-                            step="0.000001"
-                            max="90"
-                            value='%LATITUDE%'>
-                    </label>
+                        <label class="field-row">
+                            <span>Longitude:</span>
+                            <input
+                                name="longitude"
+                                id="longitude"
+                                type="number"
+                                min="-180"
+                                step="0.000001"
+                                max="180"
+                                value='%LONGITUDE%'>
+                        </label>
+                        </div>
 
-                    <label class="field-row">
-                        <span>Longitude:</span>
-                        <input
-                            name="longitude"
-                            id="longitude"
-                            type="number"
-                            min="-180"
-                            step="0.000001"
-                            max="180"
-                            value='%LONGITUDE%'>
-                    </label>
-                    </div>
-
-                    <div class="location-action mt-3">
-                    <button
-                        id="use-location"
-                        type="button">
-                        Use my current location
-                    </button>
-                    <span id="location-result" class="text-sm" aria-live="polite"></span>
-                    </div>
-
-                    <fieldset class="mt-3">
-                    <legend>Find a known place</legend>
-                    <div class="place-search">
-                        <input
-                            id="place-query"
-                            type="search"
-                            placeholder="Airport, city, landmark, or address"
-                            autocomplete="off">
+                        <div class="location-action mt-3">
                         <button
-                            id="search-places"
+                            id="use-location"
                             type="button">
-                            Search
+                            Use my current location
                         </button>
-                        <select
-                            id="place-results"
-                            class="place-results"
-                            size="5"
-                            hidden
-                            aria-label="Place search results"></select>
-                    </div>
-                    <label class="field-row location-name mt-3">
-                        <span>Screen name:</span>
+                        <span id="location-result" class="text-sm" aria-live="polite"></span>
+                        </div>
+
+                        <fieldset class="mt-3">
+                        <legend>Find a known place</legend>
+                        <div class="place-search">
+                            <input
+                                id="place-query"
+                                type="search"
+                                placeholder="Airport, city, landmark, or address"
+                                autocomplete="off">
+                            <button
+                                id="search-places"
+                                type="button">
+                                Search
+                            </button>
+                            <select
+                                id="place-results"
+                                class="place-results"
+                                size="5"
+                                hidden
+                                aria-label="Place search results"></select>
+                        </div>
+                        <div id="place-result" class="mt-2 text-sm" aria-live="polite"></div>
+                        <div class="mt-2 text-xs">
+                            Search data &copy;
+                            <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener"
+                               class="underline">OpenStreetMap contributors</a>.
+                            The provider is on the Advanced tab.
+                        </div>
+                        </fieldset>
+
+                        <label class="field-row location-name mt-3">
+                            <span>Screen name:</span>
+                            <input
+                                id="location-name"
+                                name="location-name"
+                                maxlength="18"
+                                value="%LOCATION_NAME%"
+                                placeholder="e.g. Ben Gurion">
+                        </label>
+                        <div class="mt-2 text-xs">Shown at the bottom of the radar display. Place search suggests a short name.</div>
+                    </fieldset>
+
+                    <fieldset class="config-section">
+                        <legend>Coverage</legend>
+                        <p class="section-note">
+                            How far out the edge of the radar face reaches, measured north to
+                            south from the centre. East to west spans the same number of
+                            degrees, which is less ground the further you are from the equator.
+                        </p>
+
+                        <div class="radius-row">
+                            <input
+                                id="radius-range"
+                                type="range"
+                                min="3"
+                                max="278"
+                                step="1"
+                                value="111"
+                                aria-label="Coverage radius">
+                            <div class="radius-readout">
+                                <output id="radius-readout" for="radius-range">111 km</output>
+                                <select id="distance-unit" name="distance-unit" aria-label="Distance units">
+                                    <option value="km" %DISTANCE_KM_SELECTED%>km</option>
+                                    <option value="mi" %DISTANCE_MI_SELECTED%>miles</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <!--
+                            The stored setting is a half-width in degrees, which is
+                            what the projection divides by. The slider is the only
+                            thing that writes it, so opening the page and saving
+                            without touching anything leaves the stored value exactly
+                            as it was rather than re-rounding it through kilometres.
+                        -->
+                        <input type="hidden" id="radius" name="radius" value="%RADIUS%">
+
+                        <details class="mt-3 text-xs">
+                            <summary>Set the radius in degrees</summary>
+                            <input
+                                id="radius-degrees"
+                                type="number"
+                                min="0.000001"
+                                step="0.000001"
+                                max="2.499999"
+                                class="mt-2"
+                                aria-label="Coverage radius in degrees">
+                        </details>
+                    </fieldset>
+
+                    <fieldset class="config-section">
+                        <legend>Display</legend>
+                        <div class="display-options">
+                            <section class="display-group" aria-labelledby="radar-appearance-title">
+                                <h2 id="radar-appearance-title" class="display-group-title">Radar appearance</h2>
+                                <p class="display-group-note">Sweep behavior and target presentation.</p>
+
+                                <div class="display-option">
+                                    <label class="display-toggle" for="scanline">
+                                        <span>Animated radar sweep</span>
+                                        <input id="scanline" name="scanline" type="checkbox" %SCANLINE%>
+                                    </label>
+                                </div>
+
+                                <div class="display-option display-option-select">
+                                    <label for="sweep-period">Sweep speed</label>
+                                    <select
+                                        id="sweep-period"
+                                        name="sweep-period"
+                                        class="sweep-period-select"
+                                        aria-label="Radar sweep speed">
+                                        <option value="2" %SWEEP_2_SELECTED%>Very fast &middot; 2 s/rev</option>
+                                        <option value="5" %SWEEP_5_SELECTED%>Fast &middot; 5 s/rev</option>
+                                        <option value="10" %SWEEP_10_SELECTED%>Balanced &middot; 10 s/rev</option>
+                                        <option value="18" %SWEEP_18_SELECTED%>Classic &middot; 18 s/rev</option>
+                                        <option value="30" %SWEEP_30_SELECTED%>Slow &middot; 30 s/rev</option>
+                                    </select>
+                                </div>
+
+                                <div class="display-option display-option-select">
+                                    <label for="aircraft-marker">Aircraft symbol</label>
+                                    <select
+                                        id="aircraft-marker"
+                                        name="aircraft-marker"
+                                        class="aircraft-marker-select"
+                                        aria-label="Aircraft symbol">
+                                        <option value="radar" %MARKER_RADAR_SELECTED%>Radar block + vector</option>
+                                        <option value="triangle" %MARKER_TRIANGLE_SELECTED%>Aircraft triangle</option>
+                                        <option value="dot" %MARKER_DOT_SELECTED%>Simple dot</option>
+                                    </select>
+                                </div>
+
+                                <div class="display-option">
+                                    <label class="display-toggle" for="wind">
+                                        <span>Show center surface wind</span>
+                                        <input id="wind" name="wind" type="checkbox" %WIND%>
+                                    </label>
+                                </div>
+
+                            </section>
+
+                            <section class="display-group" aria-labelledby="aircraft-labels-title">
+                                <h2 id="aircraft-labels-title" class="display-group-title">Aircraft labels</h2>
+                                <p class="display-group-note">Callsigns are always shown. Choose the additional lines below.</p>
+
+                                <div class="display-option">
+                                    <label class="display-toggle" for="speed">
+                                        <span>Show speed</span>
+                                        <input id="speed" name="speed" type="checkbox" %SPEED%>
+                                    </label>
+                                    <select id="speed-unit" name="speed-unit" aria-label="Speed units">
+                                        <option value="knots" %SPEED_KNOTS_SELECTED%>Knots</option>
+                                        <option value="meters-second" %SPEED_MS_SELECTED%>m/s</option>
+                                    </select>
+                                </div>
+
+                                <div class="display-option">
+                                    <label class="display-toggle" for="altitude">
+                                        <span>Show altitude</span>
+                                        <input id="altitude" name="altitude" type="checkbox" %ALTITUDE%>
+                                    </label>
+                                    <select id="altitude-unit" name="altitude-unit" aria-label="Altitude units">
+                                        <option value="feet" %ALTITUDE_FEET_SELECTED%>Feet</option>
+                                        <option value="meters" %ALTITUDE_METERS_SELECTED%>Metres</option>
+                                    </select>
+                                </div>
+
+                                <div class="display-option">
+                                    <label class="display-toggle" for="destination">
+                                        <span>Show route when available</span>
+                                        <input id="destination" name="destination" type="checkbox" %DESTINATION%>
+                                    </label>
+                                </div>
+                            </section>
+                        </div>
+                    </fieldset>
+                </div>
+
+                <div class="tab-panel" id="panel-setup" data-panel="setup"
+                     role="tabpanel" aria-labelledby="tab-setup" hidden>
+
+                    <fieldset class="config-section">
+                        <legend>Wi-Fi network</legend>
+                        <p class="section-note">%NETWORK_NOTE%</p>
+
+                        <details class="network-details" %NETWORK_OPEN%>
+                            <summary>%NETWORK_SUMMARY%</summary>
+                            <div class="network-grid mt-3">
+                                <div class="ssid-row">
+                                    <select
+                                        id="wifi-ssid"
+                                        name="wifi-ssid"
+                                        data-current="%WIFI_SSID%"
+                                        aria-label="Available networks">
+                                        <option value="">Looking for networks...</option>
+                                    </select>
+                                    <button
+                                        id="rescan-wifi"
+                                        type="button">
+                                        Rescan
+                                    </button>
+                                </div>
+
+                                <label class="field-row" id="wifi-manual-row" hidden>
+                                    <span>Network name:</span>
+                                    <input
+                                        id="wifi-ssid-manual"
+                                        name="wifi-ssid-manual"
+                                        maxlength="32"
+                                        autocomplete="off"
+                                        spellcheck="false"
+                                        disabled
+                                        placeholder="Hidden or out-of-range network name">
+                                </label>
+
+                                <label class="field-row">
+                                    <span>Password:</span>
+                                    <input
+                                        id="wifi-pass"
+                                        name="wifi-pass"
+                                        type="password"
+                                        maxlength="63"
+                                        autocomplete="off"
+                                        spellcheck="false"
+                                        placeholder="%WIFI_PASS_PLACEHOLDER%">
+                                </label>
+
+                                <div class="text-xs">
+                                    The radar joins 2.4 GHz networks only. Leave the password blank for an
+                                    open network, or to keep the one already stored. Pick "Other network"
+                                    from the list to type a hidden network's name.
+                                </div>
+                                <div id="wifi-result" class="text-sm" aria-live="polite"></div>
+                            </div>
+                        </details>
+
+                        <div class="network-actions">
+                            <button type="button" id="forget-wifi" class="link-button" %FORGET_HIDDEN%>
+                                Forget this network
+                            </button>
+                            <span id="network-action-result" class="text-sm" aria-live="polite"></span>
+                        </div>
+                    </fieldset>
+
+                    <!--
+                        Hidden on the setup hotspot: OpenSky cannot be reached
+                        from it, the anonymous allowance covers a first boot, and
+                        the credentials have to be fetched from a website the
+                        phone filling this in cannot open while it is joined to
+                        the radar. Hidden rather than removed, so its two fields
+                        still submit and keep whatever is already stored.
+                    -->
+                    <fieldset class="config-section" %OPENSKY_HIDDEN%>
+                        <legend>OpenSky connection</legend>
+                        <p class="section-note">
+                            Where the aircraft come from. Without credentials the radar uses the
+                            anonymous allowance, which is refreshed far less often. To get your own:
+                            register a free account at
+                            <a href="https://opensky-network.org"
+                               target="_blank" rel="noopener" class="underline">opensky-network.org</a>,
+                            sign in, then Register. Open
+                            <a href="https://opensky-network.org/my-opensky/account"
+                               target="_blank" rel="noopener" class="underline">Account &rarr; API client</a>
+                            and create a new API client.
+                        </p>
+                        <div class="credentials">
+                        <label class="field-row">
+                        <span>Client ID:</span>
                         <input
-                            id="location-name"
-                            name="location-name"
-                            maxlength="18"
-                            value="%LOCATION_NAME%"
-                            placeholder="e.g. Ben Gurion">
-                    </label>
-                    <div class="mt-2 text-xs">Shown at the bottom of the radar display. Place search suggests a short name.</div>
-                    <div id="place-result" class="mt-2 text-sm" aria-live="polite"></div>
-                    <div class="mt-2 text-xs">
-                        Search data &copy;
-                        <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener"
-                           class="underline">OpenStreetMap contributors</a>
-                    </div>
-                    <details class="mt-2 text-xs">
-                        <summary>Place search provider</summary>
+                            name="opensky-id"
+                            autocomplete="off"
+                            spellcheck="false"
+                            value='%OPENSKY_ID%'>
+                        </label>
+
+                        <label class="field-row">
+                        <span>Client secret:</span>
+                        <input
+                            name="opensky-secret"
+                            type="password"
+                            autocomplete="off"
+                            spellcheck="false"
+                            placeholder="%OPENSKY_SECRET_PLACEHOLDER%">
+                        </label>
+                        </div>
+                    </fieldset>
+                </div>
+
+                <div class="tab-panel" id="panel-advanced" data-panel="advanced"
+                     role="tabpanel" aria-labelledby="tab-advanced" hidden>
+
+                    <fieldset class="config-section">
+                        <legend>Firmware</legend>
+                        <p class="section-note">
+                            The radar checks for a new release once an hour. Installing takes about a
+                            minute and ends with a restart, so the display is unavailable while it runs.
+                        </p>
+                        <div class="display-option display-option-select">
+                            <label for="auto-update">When a new release is found</label>
+                            <select
+                                id="auto-update"
+                                name="auto-update"
+                                class="update-mode-select"
+                                aria-label="Firmware update behaviour">
+                                <option value="true" %AUTO_UPDATE_ON_SELECTED%>Install automatically</option>
+                                <option value="false" %AUTO_UPDATE_OFF_SELECTED%>Ask me first</option>
+                            </select>
+                        </div>
+
+                        <div class="firmware-footer">
+                            <span class="firmware-version">Firmware %FIRMWARE_VERSION%</span>
+                            &middot; released %FIRMWARE_RELEASED%
+                            <p class="firmware-notes">%FIRMWARE_NOTES%</p>
+                            <p class="firmware-update">
+                                <button type="button" id="check-update" class="link-button">Check for updates now</button>
+                                <button type="button" id="install-update" class="link-button" hidden>Install now</button>
+                                <span id="update-status" aria-live="polite"></span>
+                            </p>
+                        </div>
+                    </fieldset>
+
+                    <fieldset class="config-section">
+                        <legend>Panel alignment</legend>
+                        <p class="section-note">
+                            Leave at 0 unless you can see that the display sits crooked in its
+                            bezel. Anything other than 0 slows each frame down.
+                        </p>
+                        <label class="field-row">
+                        <span>Rotation trim (in &deg;):</span>
+                        <input
+                            name="screen-trim"
+                            type="number"
+                            min="%SCREEN_TRIM_MIN%"
+                            step="0.1"
+                            max="%SCREEN_TRIM_MAX%"
+                            value='%SCREEN_TRIM%'>
+                        </label>
+
+                        <div class="display-option">
+                            <label class="display-toggle" for="alignment-test">
+                                <span>Show alignment pattern instead of the radar</span>
+                                <input id="alignment-test" name="alignment-test" type="checkbox" %ALIGNMENT_TEST%>
+                            </label>
+                        </div>
+
+                        <details class="mt-3 text-xs">
+                            <summary>How to use these two</summary>
+                            <p class="mt-2">
+                                The trim is for a display whose glass sits slightly crooked in its
+                                bezel, so the clock digits and text run a little downhill. It turns
+                                the whole picture by this many degrees: positive turns it clockwise,
+                                so use a negative value if the right-hand side of a horizontal line
+                                sits too low. A quarter turn is not this setting.
+                            </p>
+                            <p>
+                                The alignment pattern puts a crosshair, a ring on the outermost
+                                pixels, and a degree scale on the display so you can measure the tilt
+                                against whatever the radar is mounted in. Set the trim, save, look,
+                                repeat &mdash; then clear the box. The radar shows no aircraft while
+                                it is ticked.
+                            </p>
+                        </details>
+                    </fieldset>
+
+                    <fieldset class="config-section">
+                        <legend>Place search provider</legend>
+                        <p class="section-note">
+                            The Nominatim-compatible service the Radar tab's place search asks.
+                            Change it only to point at your own instance.
+                        </p>
                         <input
                             id="geocoder-url"
                             name="geocoder-url"
                             value="%GEOCODER_URL%"
-                            aria-label="Nominatim-compatible place search URL"
-                            class="mt-2">
-                    </details>
+                            aria-label="Nominatim-compatible place search URL">
                     </fieldset>
 
-                    <label class="field-row mt-3">
-                    <span>Radius (in &deg;):</span>
-                    <input
-                        name="radius"
-                        type="number"
-                        min="0.000001"
-                        step="0.000001"
-                        max="2.499999"
-                        value='%RADIUS%'>
-                    </label>
-                </fieldset>
-
-                <fieldset class="config-section">
-                    <legend>OpenSky connection</legend>
-                    <p class="section-note">
-                        To get your own: register a free account at
-                        <a href="https://opensky-network.org"
-                           target="_blank" rel="noopener" class="underline">opensky-network.org</a>,
-                        sign in, then Register. Open
-                        <a href="https://opensky-network.org/my-opensky/account"
-                           target="_blank" rel="noopener" class="underline">Account &rarr; API client</a>
-                        and create a new API client.
-                    </p>
-                    <div class="credentials">
-                    <label class="field-row">
-                    <span>Client ID:</span>
-                    <input
-                        name="opensky-id"
-                        autocomplete="off"
-                        spellcheck="false"
-                        value='%OPENSKY_ID%'>
-                    </label>
-
-                    <label class="field-row">
-                    <span>Client secret:</span>
-                    <input
-                        name="opensky-secret"
-                        type="password"
-                        autocomplete="off"
-                        spellcheck="false"
-                        placeholder="%OPENSKY_SECRET_PLACEHOLDER%">
-                    </label>
-                    </div>
-                </fieldset>
-
-                <fieldset class="config-section">
-                    <legend>Display</legend>
-                    <div class="display-options">
-                        <section class="display-group" aria-labelledby="radar-appearance-title">
-                            <h2 id="radar-appearance-title" class="display-group-title">Radar appearance</h2>
-                            <p class="display-group-note">Sweep behavior and target presentation.</p>
-
-                            <div class="display-option">
-                                <label class="display-toggle" for="scanline">
-                                    <span>Animated radar sweep</span>
-                                    <input id="scanline" name="scanline" type="checkbox" %SCANLINE%>
-                                </label>
-                            </div>
-
-                            <div class="display-option display-option-select">
-                                <label for="sweep-period">Sweep speed</label>
-                                <select
-                                    id="sweep-period"
-                                    name="sweep-period"
-                                    class="sweep-period-select"
-                                    aria-label="Radar sweep speed">
-                                    <option value="2" %SWEEP_2_SELECTED%>Very fast &middot; 2 s/rev</option>
-                                    <option value="5" %SWEEP_5_SELECTED%>Fast &middot; 5 s/rev</option>
-                                    <option value="10" %SWEEP_10_SELECTED%>Balanced &middot; 10 s/rev</option>
-                                    <option value="18" %SWEEP_18_SELECTED%>Classic &middot; 18 s/rev</option>
-                                    <option value="30" %SWEEP_30_SELECTED%>Slow &middot; 30 s/rev</option>
-                                </select>
-                            </div>
-
-                            <div class="display-option display-option-select">
-                                <label for="aircraft-marker">Aircraft symbol</label>
-                                <select
-                                    id="aircraft-marker"
-                                    name="aircraft-marker"
-                                    class="aircraft-marker-select"
-                                    aria-label="Aircraft symbol">
-                                    <option value="radar" %MARKER_RADAR_SELECTED%>Radar block + vector</option>
-                                    <option value="triangle" %MARKER_TRIANGLE_SELECTED%>Aircraft triangle</option>
-                                    <option value="dot" %MARKER_DOT_SELECTED%>Simple dot</option>
-                                </select>
-                            </div>
-
-                            <div class="display-option">
-                                <label class="display-toggle" for="wind">
-                                    <span>Show center surface wind</span>
-                                    <input id="wind" name="wind" type="checkbox" %WIND%>
-                                </label>
-                            </div>
-
-                            <div class="display-option">
-                                <label class="display-toggle" for="clock">
-                                    <span>Show local time</span>
-                                    <input id="clock" name="clock" type="checkbox" %CLOCK%>
-                                </label>
-                                <select id="clock-format" name="clock-format" aria-label="Clock format">
-                                    <option value="24h" %CLOCK_24H_SELECTED%>24-hour</option>
-                                    <option value="12h" %CLOCK_12H_SELECTED%>AM/PM</option>
-                                </select>
-                            </div>
-                        </section>
-
-                        <section class="display-group" aria-labelledby="aircraft-labels-title">
-                            <h2 id="aircraft-labels-title" class="display-group-title">Aircraft labels</h2>
-                            <p class="display-group-note">Callsigns are always shown. Choose the additional lines below.</p>
-
-                            <div class="display-option">
-                                <label class="display-toggle" for="speed">
-                                    <span>Show speed</span>
-                                    <input id="speed" name="speed" type="checkbox" %SPEED%>
-                                </label>
-                                <select id="speed-unit" name="speed-unit" aria-label="Speed units">
-                                    <option value="knots" %SPEED_KNOTS_SELECTED%>Knots</option>
-                                    <option value="meters-second" %SPEED_MS_SELECTED%>m/s</option>
-                                </select>
-                            </div>
-
-                            <div class="display-option">
-                                <label class="display-toggle" for="altitude">
-                                    <span>Show altitude</span>
-                                    <input id="altitude" name="altitude" type="checkbox" %ALTITUDE%>
-                                </label>
-                                <select id="altitude-unit" name="altitude-unit" aria-label="Altitude units">
-                                    <option value="feet" %ALTITUDE_FEET_SELECTED%>Feet</option>
-                                    <option value="meters" %ALTITUDE_METERS_SELECTED%>Metres</option>
-                                </select>
-                            </div>
-
-                            <div class="display-option">
-                                <label class="display-toggle" for="destination">
-                                    <span>Show route when available</span>
-                                    <input id="destination" name="destination" type="checkbox" %DESTINATION%>
-                                </label>
-                            </div>
-                        </section>
-                    </div>
-                </fieldset>
-
-                <fieldset class="config-section">
-                    <legend>Panel alignment</legend>
-                    <p class="section-note">
-                        For a display whose glass sits slightly crooked in its bezel, so the
-                        clock digits and text run a little downhill. Turns the whole picture
-                        by this many degrees: positive turns it clockwise, so use a negative
-                        value if the right-hand side of a horizontal line sits too low.
-                        Leave at 0 unless you can see the tilt &mdash; anything other than 0
-                        slows each frame down. A quarter turn is not this setting.
-                    </p>
-                    <label class="field-row">
-                    <span>Rotation trim (in &deg;):</span>
-                    <input
-                        name="screen-trim"
-                        type="number"
-                        min="%SCREEN_TRIM_MIN%"
-                        step="0.1"
-                        max="%SCREEN_TRIM_MAX%"
-                        value='%SCREEN_TRIM%'>
-                    </label>
-
-                    <div class="display-option">
-                        <label class="display-toggle" for="alignment-test">
-                            <span>Show alignment pattern instead of the radar</span>
-                            <input id="alignment-test" name="alignment-test" type="checkbox" %ALIGNMENT_TEST%>
+                    <fieldset class="config-section">
+                        <legend>Remote diagnostics</legend>
+                        <p class="section-note">
+                            Off unless a key is entered below. When it is on, this radar sends crash
+                            reports and error messages to
+                            <a href="https://insights.espressif.com"
+                               target="_blank" rel="noopener" class="underline">ESP Insights</a>
+                            so whoever looks after it can see why it misbehaved without taking it
+                            apart. Along with those it reports free memory, uptime, Wi-Fi signal
+                            strength, and this network's name and IP address. It does not send your
+                            Wi-Fi password, your OpenSky credentials, or the location the radar is
+                            centred on. Clear the key to stop all of it.
+                        </p>
+                        <div class="credentials">
+                        <label class="field-row">
+                        <span>Insights auth key:</span>
+                        <input
+                            name="insights-key"
+                            type="password"
+                            autocomplete="off"
+                            spellcheck="false"
+                            placeholder="%INSIGHTS_KEY_PLACEHOLDER%">
                         </label>
-                    </div>
-                    <p class="section-note">
-                        Puts a crosshair, a ring on the outermost pixels, and a degree scale on
-                        the display so you can measure the tilt against whatever the radar is
-                        mounted in. Set the trim, save, look, repeat &mdash; then clear this box.
-                        The radar shows no aircraft while it is ticked.
-                    </p>
-                </fieldset>
 
-                <fieldset class="config-section">
-                    <legend>Firmware updates</legend>
-                    <p class="section-note">
-                        The radar checks for a new release once an hour. Installing takes about a
-                        minute and ends with a restart, so the display is unavailable while it runs.
-                    </p>
-                    <div class="display-option display-option-select">
-                        <label for="auto-update">When a new release is found</label>
-                        <select
-                            id="auto-update"
-                            name="auto-update"
-                            class="update-mode-select"
-                            aria-label="Firmware update behaviour">
-                            <option value="true" %AUTO_UPDATE_ON_SELECTED%>Install automatically</option>
-                            <option value="false" %AUTO_UPDATE_OFF_SELECTED%>Ask me first</option>
-                        </select>
-                    </div>
-                </fieldset>
-
-                <fieldset class="config-section">
-                    <legend>Remote diagnostics</legend>
-                    <p class="section-note">
-                        Off unless a key is entered below. When it is on, this radar sends crash
-                        reports and error messages to
-                        <a href="https://insights.espressif.com"
-                           target="_blank" rel="noopener" class="underline">ESP Insights</a>
-                        so whoever looks after it can see why it misbehaved without taking it
-                        apart. Along with those it reports free memory, uptime, Wi-Fi signal
-                        strength, and this network's name and IP address. It does not send your
-                        Wi-Fi password, your OpenSky credentials, or the location the radar is
-                        centred on. Clear the key to stop all of it.
-                    </p>
-                    <div class="credentials">
-                    <label class="field-row">
-                    <span>Insights auth key:</span>
-                    <input
-                        name="insights-key"
-                        type="password"
-                        autocomplete="off"
-                        spellcheck="false"
-                        placeholder="%INSIGHTS_KEY_PLACEHOLDER%">
-                    </label>
-
-                    <label class="field-row">
-                    <span>Label:</span>
-                    <input
-                        name="insights-label"
-                        autocomplete="off"
-                        maxlength="48"
-                        placeholder="e.g. kitchen shelf"
-                        value='%INSIGHTS_LABEL%'>
-                    </label>
-                    </div>
-                    <p class="section-note">
-                        The label is only there so this radar is recognisable on the dashboard,
-                        which otherwise lists it as %NET_MAC%.
-                    </p>
-
-                    <div class="display-option">
-                        <label class="display-toggle" for="insights-clear">
-                            <span>Turn reporting off and forget the key</span>
-                            <input id="insights-clear" name="insights-clear" type="checkbox">
+                        <label class="field-row">
+                        <span>Label:</span>
+                        <input
+                            name="insights-label"
+                            autocomplete="off"
+                            maxlength="48"
+                            placeholder="e.g. kitchen shelf"
+                            value='%INSIGHTS_LABEL%'>
                         </label>
-                    </div>
-                    <p class="section-note">
-                        An empty key box means &ldquo;keep the stored key&rdquo;, so this box is how
-                        the key is actually removed. Takes effect on the restart that saving does.
-                    </p>
-                </fieldset>
+                        </div>
+                        <p class="section-note mt-3">
+                            The label is only there so this radar is recognisable on the dashboard,
+                            which otherwise lists it as %NET_MAC%.
+                        </p>
+
+                        <div class="display-option">
+                            <label class="display-toggle" for="insights-clear">
+                                <span>Turn reporting off and forget the key</span>
+                                <input id="insights-clear" name="insights-clear" type="checkbox">
+                            </label>
+                        </div>
+                        <p class="section-note mt-3">
+                            An empty key box means &ldquo;keep the stored key&rdquo;, so this box is how
+                            the key is actually removed. Takes effect on the restart that saving does.
+                        </p>
+                    </fieldset>
+
+                    <fieldset class="config-section">
+                        <legend>This radar</legend>
+                        <dl class="network-diagnostics">
+                            <dt>Address</dt><dd>%NET_IP%</dd>
+                            <dt>Signal</dt><dd>%NET_RSSI%</dd>
+                            <dt>MAC</dt><dd>%NET_MAC%</dd>
+                            <dt>Uptime</dt><dd>%NET_UPTIME%</dd>
+                            <dt>Free memory</dt><dd>%NET_HEAP%</dd>
+                        </dl>
+                        <div class="network-actions">
+                            <button type="button" id="restart-radar" class="link-button">Restart radar</button>
+                            <span id="restart-result" class="text-sm" aria-live="polite"></span>
+                        </div>
+                    </fieldset>
+
+                    <fieldset class="config-section danger-zone">
+                        <legend>Factory reset</legend>
+                        <p class="section-note">
+                            Erases every setting on this page &mdash; network, location, OpenSky
+                            credentials, display choices, panel trim and the diagnostics key
+                            &mdash; and restarts into the setup hotspot as if the radar had just
+                            been flashed. The installed firmware version is not affected. There is
+                            no undo.
+                        </p>
+                        <div class="display-option">
+                            <label class="display-toggle" for="factory-reset-confirm">
+                                <span>Yes, erase all settings on this radar</span>
+                                <input id="factory-reset-confirm" type="checkbox">
+                            </label>
+                        </div>
+                        <div class="danger-action">
+                            <button type="button" id="factory-reset" class="danger-button" disabled>
+                                Erase and restart
+                            </button>
+                            <span id="factory-reset-result" class="text-sm" aria-live="polite"></span>
+                        </div>
+                    </fieldset>
+                </div>
 
                 <div class="save-row">
                     <input
@@ -1112,22 +1441,14 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                         value="%SAVE_LABEL%"
                         class="save-button">
 
+                    <span id="save-state" class="save-state" aria-live="polite"></span>
                     <div id="result" aria-live="polite"></div>
                 </div>
             </form>
 
-            <div class="firmware-footer">
-                <span class="firmware-version">Firmware %FIRMWARE_VERSION%</span>
-                &middot; released %FIRMWARE_RELEASED%
-                <p class="firmware-notes">%FIRMWARE_NOTES%</p>
-                <p class="firmware-update">
-                    <button type="button" id="check-update" class="link-button">Check for updates now</button>
-                    <button type="button" id="install-update" class="link-button" hidden>Install now</button>
-                    <span id="update-status" aria-live="polite"></span>
-                </p>
-            </div>
-
             <div class="project-footer">
+                <span class="firmware-version">Firmware %FIRMWARE_VERSION%</span>
+                &middot;
                 <a href="https://github.com/thedontknowguy/micro-radar" target="_blank" rel="noopener"
                    class="underline">Micro Radar on GitHub</a>
                 <p class="project-credit">
@@ -1140,10 +1461,58 @@ static const char CONFIG_HTML[] PROGMEM = R"(
             </div>
         </fieldset>
 
+        <!--
+            The mark the panel itself shows at boot, so the page someone opens
+            next is recognisably the same device. A sibling of the panel rather
+            than a child of it: it is positioned against the shell, and coming
+            after the panel in source order is what puts it on top of the border
+            it is there to sit on. Served from /logo.png rather than inlined --
+            it is the one asset here worth caching, and it would otherwise be
+            re-sent with every reload. Decorative, so the alt text is empty:
+            the legend on the opposite corner already names the page.
+        -->
+        <img class="masthead-mark" src="/logo.png" width="88" height="88"
+             alt="" aria-hidden="true">
+      </div>
+
         <script>
             // Setup mode means this page is being served from the radar's own
             // hotspot, so nothing on the far side of the internet is reachable.
             const setupMode = document.body.dataset.netMode === 'setup';
+
+            const tabButtons = Array.from(document.querySelectorAll('.tab-button'));
+            const tabPanels = Array.from(document.querySelectorAll('.tab-panel'));
+
+            function showTab(name) {
+                tabPanels.forEach(function(panel) {
+                    panel.hidden = panel.dataset.panel !== name;
+                });
+                tabButtons.forEach(function(button) {
+                    button.setAttribute(
+                        'aria-selected',
+                        button.dataset.tab === name ? 'true' : 'false'
+                    );
+                });
+            }
+
+            tabButtons.forEach(function(button) {
+                button.addEventListener('click', function() {
+                    showTab(button.dataset.tab);
+                    // Replaced rather than pushed: the tabs are one page, and
+                    // filling the history with them turns Back into a way of
+                    // walking sideways instead of leaving.
+                    history.replaceState(null, '', '#' + button.dataset.tab);
+                });
+            });
+
+            // On the hotspot there is nothing to choose between: the network is
+            // the only thing worth setting before the radar can reach anything.
+            const requestedTab = location.hash.replace('#', '');
+            showTab(
+                setupMode
+                    ? 'setup'
+                    : (tabButtons.some(b => b.dataset.tab === requestedTab) ? requestedTab : 'radar')
+            );
 
             const locationButton = document.getElementById('use-location');
             const locationResult = document.getElementById('location-result');
@@ -1174,6 +1543,80 @@ static const char CONFIG_HTML[] PROGMEM = R"(
             bindDependentSelect('speed', 'speed-unit');
             bindDependentSelect('altitude', 'altitude-unit');
             bindDependentSelect('clock', 'clock-format');
+
+            // The radar stores its coverage as a half-width in degrees, because
+            // that is what the projection divides by. Degrees are not a distance
+            // anyone can picture, so the field people actually touch is a slider
+            // in kilometres or miles and the stored value is derived from it.
+            // North-south only: the projection applies the same number of
+            // degrees to longitude, which is less ground away from the equator.
+            const KM_PER_DEGREE = 111.32;
+            const MI_PER_KM = 0.621371;
+            const MIN_RADIUS_DEGREES = 0.000001;
+            const MAX_RADIUS_DEGREES = 2.499999;
+
+            const radiusField = document.getElementById('radius');
+            const radiusRange = document.getElementById('radius-range');
+            const radiusReadout = document.getElementById('radius-readout');
+            const radiusDegrees = document.getElementById('radius-degrees');
+            const distanceUnit = document.getElementById('distance-unit');
+
+            function inMiles() {
+                return distanceUnit.value === 'mi';
+            }
+
+            function distanceFromDegrees(degrees) {
+                const km = degrees * KM_PER_DEGREE;
+                return inMiles() ? km * MI_PER_KM : km;
+            }
+
+            function degreesFromDistance(distance) {
+                const km = inMiles() ? distance / MI_PER_KM : distance;
+                return Math.min(
+                    MAX_RADIUS_DEGREES,
+                    Math.max(MIN_RADIUS_DEGREES, km / KM_PER_DEGREE)
+                );
+            }
+
+            function storedDegrees() {
+                const degrees = Number(radiusField.value);
+                return degrees > 0 && degrees <= MAX_RADIUS_DEGREES ? degrees : 1;
+            }
+
+            // Reads the stored degrees rather than the slider position, so a
+            // value that does not land exactly on a whole kilometre is shown and
+            // kept as it is. Only an actual drag rewrites the stored value.
+            function showRadius() {
+                const degrees = storedDegrees();
+                const distance = distanceFromDegrees(degrees);
+
+                radiusRange.max = String(Math.floor(distanceFromDegrees(MAX_RADIUS_DEGREES)));
+                radiusRange.value = String(Math.round(distance));
+                radiusReadout.textContent =
+                    (distance < 10 ? distance.toFixed(1) : String(Math.round(distance)))
+                    + (inMiles() ? ' miles' : ' km');
+                radiusDegrees.value = degrees.toFixed(6);
+            }
+
+            radiusRange.addEventListener('input', function() {
+                radiusField.value = degreesFromDistance(Number(radiusRange.value)).toFixed(6);
+                showRadius();
+            });
+
+            // Switching units only changes how the same coverage is written out.
+            distanceUnit.addEventListener('change', showRadius);
+
+            radiusDegrees.addEventListener('change', function() {
+                const typed = Number(radiusDegrees.value);
+                if (!(typed >= MIN_RADIUS_DEGREES && typed <= MAX_RADIUS_DEGREES)) {
+                    showRadius();
+                    return;
+                }
+                radiusField.value = typed.toFixed(6);
+                showRadius();
+            });
+
+            showRadius();
 
             function fillLocation(latitude, longitude, message, suggestedName) {
                 document.getElementById('latitude').value = Number(latitude).toFixed(6);
@@ -1535,24 +1978,32 @@ static const char CONFIG_HTML[] PROGMEM = R"(
 
             const forgetButton = document.getElementById('forget-wifi');
             const restartButton = document.getElementById('restart-radar');
+            const factoryResetButton = document.getElementById('factory-reset');
+            const factoryResetConfirm = document.getElementById('factory-reset-confirm');
             const networkActionResult = document.getElementById('network-action-result');
+            const restartResult = document.getElementById('restart-result');
+            const factoryResetResult = document.getElementById('factory-reset-result');
 
-            // Both of these end in a reboot, so the connection dropping is the
-            // expected finish rather than a failure worth reporting.
-            function postNetworkAction(url, pending, done) {
-                networkActionResult.textContent = pending;
+            // All of these end in a reboot, so the connection dropping is the
+            // expected finish rather than a failure worth reporting. Every one
+            // of them is disabled together: once the radar is on its way down,
+            // none of the others can be honoured either.
+            function postDeviceAction(url, result, pending, done) {
+                result.textContent = pending;
                 forgetButton.disabled = true;
                 restartButton.disabled = true;
+                factoryResetButton.disabled = true;
                 fetch(url, { method: 'POST' })
-                    .then(function() { networkActionResult.textContent = done; })
-                    .catch(function() { networkActionResult.textContent = done; });
+                    .then(function() { result.textContent = done; })
+                    .catch(function() { result.textContent = done; });
             }
 
             forgetButton.addEventListener('click', function() {
                 if (!confirm('Forget the stored Wi-Fi network? The radar restarts into its setup hotspot.'))
                     return;
-                postNetworkAction(
+                postDeviceAction(
                     '/wifi/forget',
+                    networkActionResult,
                     'Forgetting...',
                     'Restarting into setup mode. Connect to the MicroRadar-Setup hotspot.'
                 );
@@ -1561,7 +2012,32 @@ static const char CONFIG_HTML[] PROGMEM = R"(
             restartButton.addEventListener('click', function() {
                 if (!confirm('Restart the radar now?'))
                     return;
-                postNetworkAction('/restart', 'Restarting...', 'Restarting. Reload this page in a minute.');
+                postDeviceAction(
+                    '/restart',
+                    restartResult,
+                    'Restarting...',
+                    'Restarting. Reload this page in a minute.'
+                );
+            });
+
+            // Two gates rather than one, and the checkbox clears itself after
+            // the button is armed only by an explicit tick: this is the one
+            // control on the page that cannot be undone by pressing Save again.
+            factoryResetConfirm.addEventListener('change', function() {
+                factoryResetButton.disabled = !factoryResetConfirm.checked;
+            });
+
+            factoryResetButton.addEventListener('click', function() {
+                if (!factoryResetConfirm.checked)
+                    return;
+                if (!confirm('Erase every setting and restart into the setup hotspot? This cannot be undone.'))
+                    return;
+                postDeviceAction(
+                    '/factory-reset',
+                    factoryResetResult,
+                    'Erasing...',
+                    'Erased. Restarting into setup mode - connect to the MicroRadar-Setup hotspot.'
+                );
             });
 
             const checkButton = document.getElementById('check-update');
@@ -1670,7 +2146,32 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                     .catch(function() {});
             }
 
-            document.getElementById('cfg').addEventListener('submit', function(e) {
+            const configForm = document.getElementById('cfg');
+            const saveState = document.getElementById('save-state');
+
+            // One Save covers all three tabs, so a change made on a tab that is
+            // no longer showing is easy to forget about. This is the only thing
+            // on the page that says the form has been touched at all.
+            function markDirty() {
+                saveState.textContent = 'Unsaved changes on this page';
+                saveState.classList.add('is-dirty');
+            }
+
+            configForm.addEventListener('input', markDirty);
+            configForm.addEventListener('change', markDirty);
+
+            // A number outside its min/max stops submission before the submit
+            // event ever fires, and the browser cannot focus a field inside a
+            // hidden panel -- so the press would do nothing at all and say
+            // nothing about why. Capture, because this has to run before the
+            // browser gives up trying to focus it.
+            configForm.addEventListener('invalid', function(e) {
+                const panel = e.target.closest('.tab-panel');
+                if (panel && panel.hidden)
+                    showTab(panel.dataset.panel);
+            }, true);
+
+            configForm.addEventListener('submit', function(e) {
                 e.preventDefault();
 
                 // Saving from the hotspot with no network chosen would reboot
@@ -1680,6 +2181,7 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                     ? manualSsid.value.trim()
                     : ssidSelect.value;
                 if (setupMode && !chosenSsid) {
+                    showTab('setup');
                     networkDetails.open = true;
                     wifiResult.textContent = 'Choose a network, or type its name, before saving.';
                     return;
@@ -1687,7 +2189,11 @@ static const char CONFIG_HTML[] PROGMEM = R"(
 
                 fetch(this.action, { method: 'POST', body: new FormData(this) })
                     .then(r => r.text())
-                    .then(html => document.getElementById('result').innerHTML = html);
+                    .then(function(html) {
+                        document.getElementById('result').innerHTML = html;
+                        saveState.textContent = '';
+                        saveState.classList.remove('is-dirty');
+                    });
             });
         </script>
     </body>
@@ -1723,6 +2229,11 @@ void ConfigurationWebServer::EnsureDefaults() {
     ensureKey("longitude", "34.880919");
     ensureKey("location-name", "Ben Gurion Airport");
     ensureKey("radius", "1.0");
+
+    // Presentation only: the radius is stored in degrees either way, because
+    // that is what the projection divides by. This is which unit the page shows
+    // it in, kept on the radar so it is the same on every phone that opens it.
+    ensureKey("distance-unit", "km");
     ensureKey("opensky-id", "");
     ensureKey("opensky-secret", "");
 
@@ -1817,6 +2328,7 @@ void ConfigurationWebServer::Initialise(FirmwareUpdater& updater, Mode serveMode
         values.longitude = EscapeHtmlAttribute(prefs.getString("longitude", ""));
         values.locationName = EscapeHtmlAttribute(prefs.getString("location-name", ""));
         values.radius = EscapeHtmlAttribute(prefs.getString("radius", "1.0"));
+        values.distanceUnit = prefs.getString("distance-unit", "km");
         values.openskyClientId = EscapeHtmlAttribute(prefs.getString("opensky-id", ""));
         const bool hasOpenskySecret = !prefs.getString("opensky-secret", "").isEmpty();
         values.geocoderUrl = EscapeHtmlAttribute(
@@ -1865,6 +2377,8 @@ void ConfigurationWebServer::Initialise(FirmwareUpdater& updater, Mode serveMode
         values.networkSummary = "Network settings";
         values.forgetHidden = setupMode ? "hidden" : "";
         values.saveLabel = setupMode ? "Save and connect" : "Save";
+        values.tabsHidden = setupMode ? "hidden" : "";
+        values.openskyHidden = setupMode ? "hidden" : "";
         values.wifiPassPlaceholder = setupMode
             ? "Network password"
             : "Leave blank to keep the stored password";
@@ -1891,6 +2405,8 @@ void ConfigurationWebServer::Initialise(FirmwareUpdater& updater, Mode serveMode
             (const uint8_t*)CONFIG_HTML, sizeof(CONFIG_HTML) - 1,
             [values](const String& var) -> String {
                 if (var == "NET_MODE")       return values.setupMode;
+                if (var == "TABS_HIDDEN")    return values.tabsHidden;
+                if (var == "OPENSKY_HIDDEN") return values.openskyHidden;
                 if (var == "NETWORK_NOTE")   return values.networkNote;
                 if (var == "NETWORK_OPEN")   return values.networkOpen;
                 if (var == "NETWORK_SUMMARY") return values.networkSummary;
@@ -1908,6 +2424,8 @@ void ConfigurationWebServer::Initialise(FirmwareUpdater& updater, Mode serveMode
                 if (var == "LONGITUDE")      return values.longitude;
                 if (var == "LOCATION_NAME")  return values.locationName;
                 if (var == "RADIUS")         return values.radius;
+                if (var == "DISTANCE_KM_SELECTED") return values.distanceUnit != "mi" ? "selected" : "";
+                if (var == "DISTANCE_MI_SELECTED") return values.distanceUnit == "mi" ? "selected" : "";
                 if (var == "OPENSKY_ID")     return values.openskyClientId;
                 if (var == "OPENSKY_SECRET_PLACEHOLDER") return values.openskySecretPlaceholder;
                 if (var == "INSIGHTS_KEY_PLACEHOLDER") return values.insightsKeyPlaceholder;
@@ -1957,6 +2475,20 @@ void ConfigurationWebServer::Initialise(FirmwareUpdater& updater, Mode serveMode
         request->send(response);
         }
     );
+
+    // The masthead mark and the favicon, which are one file. It is the only
+    // thing this server hands out that is worth letting a browser keep: the
+    // page itself is deliberately never cached, but a phone on the setup
+    // hotspot should not be pulling 10 KB of artwork back over an ESP32 access
+    // point on every reload. It only ever changes with the firmware, and a
+    // firmware update reboots the radar, so a long expiry costs nothing.
+    server.on("/logo.png", HTTP_GET, [](AsyncWebServerRequest* request) {
+        AsyncWebServerResponse* response = request->beginResponse(
+            200, "image/png", WebLogo::Png, WebLogo::Length
+        );
+        response->addHeader("Cache-Control", "public, max-age=604800, immutable");
+        request->send(response);
+    });
 
     // Network list for the Wi-Fi section. A scan takes several seconds, which
     // is far too long to hold the web server's task, so the first request
@@ -2055,6 +2587,29 @@ void ConfigurationWebServer::Initialise(FirmwareUpdater& updater, Mode serveMode
         prefs.end();
 
         request->send(200, "text/plain", "Wi-Fi forgotten - restarting into setup mode");
+        restartRequested.store(true);
+    });
+
+    // Erases every setting and reboots, which lands in setup mode with the
+    // defaults EnsureDefaults() writes back on the way up. The firmware image
+    // itself is untouched: this is a settings reset, not a downgrade.
+    server.on("/factory-reset", HTTP_POST, [this](AsyncWebServerRequest* request) {
+        if (RejectedAsCrossSite(request))
+            return;
+
+        Serial.println("[POST] Factory reset requested from the configuration page");
+        prefs.begin("config", false);
+        prefs.clear();
+
+        // Written back immediately after the wipe, for the same reason
+        // /wifi/forget writes it: the Wi-Fi driver keeps its own copy of the
+        // last network joined, and clearing this flag re-arms the one-shot
+        // import in WiFiConnection.cpp. A reset that let that run would put the
+        // radar straight back on the network it was just reset off.
+        prefs.putString("wifi-imported", "true");
+        prefs.end();
+
+        request->send(200, "text/plain", "Settings erased - restarting into setup mode");
         restartRequested.store(true);
     });
 
@@ -2174,6 +2729,7 @@ void ConfigurationWebServer::Initialise(FirmwareUpdater& updater, Mode serveMode
             return IsNumberInRange(v, -SCREEN_TRIM_MAX_DEGREES, SCREEN_TRIM_MAX_DEGREES);
         });
         saveIf("geocoder-url", IsHttpUrl);
+        saveIfOneOf("distance-unit", { "km", "mi" });
         saveIfOneOf("speed-unit", { "knots", "meters-second" });
         saveIfOneOf("altitude-unit", { "feet", "meters", "kft" });
         saveIfOneOf("sweep-period", { "2", "5", "10", "18", "30" });
