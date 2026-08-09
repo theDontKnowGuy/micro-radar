@@ -23,6 +23,7 @@
 
 #ifdef CONFIG_ESP_INSIGHTS_ENABLED
 #include <Insights.h>
+#include <esp_rmaker_work_queue.h>
 #endif
 
 namespace {
@@ -172,6 +173,43 @@ uint32_t RecordBoot()
     return count;
 }
 
+#ifdef CONFIG_ESP_INSIGHTS_ENABLED
+// Shuts the agent down without pulling the rug out from under its own task.
+//
+// esp_insights_deinit() tears down in the wrong order for an agent that is
+// still working. It calls, in this sequence:
+//
+//     esp_insights_transport_disconnect();
+//     esp_insights_disable();          // frees the diagnostics store, the RTC
+//                                      // log store, the metric and variable
+//                                      // tables, and NULLs them
+//     esp_insights_transport_unregister();
+//     esp_rmaker_work_queue_deinit();  // only now stops the task using them
+//
+// and everything the agent uploads runs on the rmaker work queue task, because
+// esp_insights_send_data() does nothing but queue a work item for it. So a
+// send() immediately followed by end() -- which is what the two callers below
+// used to do -- hands the task an upload and then frees the buffers it is
+// reading from mid-post. The task writes through a pointer that has just been
+// zeroed and the device dies with StoreProhibited at address 0 in
+// "rmaker_queue_ta". Nothing in the app's own backtrace, because it is not the
+// app's stack. This is what a radar was crashing on partway through an OTA.
+//
+// Stopping the queue first closes the window. esp_rmaker_work_queue_deinit()
+// raises the stop flag and blocks until the task has finished whatever it is
+// posting and deleted itself -- its receive has a two second timeout, so this
+// costs at most that plus the tail of one upload -- and only then deletes the
+// queue. By the time Insights.end() runs there is no task left to trip over the
+// teardown, and the esp_rmaker_work_queue_deinit() inside it finds the queue
+// already gone and returns.
+void StopAgent()
+{
+    esp_rmaker_work_queue_deinit();
+    Insights.end();
+    started = false;
+}
+#endif
+
 const char* ResetReasonName(esp_reset_reason_t reason)
 {
     switch (reason) {
@@ -290,8 +328,7 @@ void Poll()
     Serial.println("Diagnostics: transport failing repeatedly - stopping the agent");
     Serial.println("Diagnostics: check the auth key on the configuration page, then restart");
 
-    Insights.end();
-    started = false;
+    StopAgent();
 #endif
 }
 
@@ -309,10 +346,16 @@ void PauseForUpdate()
     // A last word before going quiet. Sent synchronously-ish rather than left
     // to the next scheduled post, because the next scheduled post will not
     // happen -- this is followed by a flash rewrite and a reboot.
+    //
+    // StopAgent() rather than Insights.end() directly, and the reason is the
+    // send() on the line above: it queues the upload rather than performing it,
+    // so the teardown has to wait for the queue. See StopAgent(). If the task
+    // stops before it gets to this event, the event is not lost -- it stays in
+    // the RTC store, which survives the reboot, and goes out with the first
+    // report from the new firmware.
     Event("update", "installing, going quiet");
     Insights.send();
-    Insights.end();
-    started = false;
+    StopAgent();
 #endif
 }
 
