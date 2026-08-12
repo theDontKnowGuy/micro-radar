@@ -4,33 +4,32 @@
 
 #include "ui/ConfigQr.h"
 #include "ui/PanelTrim.h"
+#include "ui/SmoothText.h"
 
 namespace {
 
-// Tried largest first: the first entry whose every line clears the bezel wins,
-// so the order here is the preference order.
+// The sizes this screen sets, in pixels of line height. Tried largest first:
+// the first entry whose every line clears the bezel wins, so the order here is
+// the preference order.
 //
-// These are real proportional letterforms drawn at the size they were designed
-// for, which is the whole point of the ladder. The alternative -- what this
-// screen used to do -- is the built-in 6x8 bitmap face scaled up by a whole
-// number, and at the 3x the longer lines force, every curve in the alphabet
-// arrives as a staircase of 3x3 blocks. Bold rather than regular because the
-// text is green-on-black at arm's length, where thin stems disappear.
+// These are real proportional letterforms at a size that suits them, which is
+// the whole point of the ladder. The alternative -- what this screen used to do
+// -- is the built-in 6x8 bitmap face scaled up by a whole number, and at the 3x
+// the longer lines force, every curve in the alphabet arrives as a staircase of
+// 3x3 blocks.
 //
-// The gap between the 12pt and 18pt entries is wide -- a third of the cap
-// height -- and there is nothing in the library to put between them: the other
-// faces that size are all wider per letter, which is the opposite of what a
-// screen short of width has any use for. That gap is why this file sets a
-// screen in two sizes rather than one; see ShowQrAddressScreen.
-const lgfx::IFont* const FontLadder[] = {
-  &fonts::FreeSansBold24pt7b,
-  &fonts::FreeSansBold18pt7b,
-  &fonts::FreeSansBold12pt7b,
-  &fonts::FreeSansBold9pt7b,
-};
+// The four heights are the ones the bold bitmap ladder that came before offered
+// -- 24pt, 18pt, 12pt and 9pt of FreeSansBold -- kept to the pixel so the
+// screens are laid out exactly as they were. What changed underneath is how a
+// run gets onto the panel: see SmoothText.
+//
+// The gap between the third and second entries is wide, a third of the cap
+// height, and it is why this file sets a screen in two sizes rather than one;
+// see ShowQrAddressScreen.
+constexpr int SizeLadder[] = { 47, 33, 23, 18 };
 
-constexpr int LadderSize = sizeof(FontLadder) / sizeof(*FontLadder);
-constexpr int SmallestFontIndex = LadderSize - 1;
+constexpr int LadderSize = sizeof(SizeLadder) / sizeof(*SizeLadder);
+constexpr int SmallestSizeIndex = LadderSize - 1;
 
 // How many supporting lines a screen can carry, and so how many slots every
 // layout here is written for.
@@ -175,20 +174,18 @@ bool ClearsBezel(int width, int top, int fontHeight)
   return width <= 2 * HalfWidthAt(dy);
 }
 
-// Whether this pairing of faces holds the whole screen. Everything is measured
+// Whether this pairing of sizes holds the whole screen. Everything is measured
 // where it would actually be drawn -- there is no other way to ask on a round
 // panel, where what a line may be worth in width depends on how far down it
 // lands, which depends on how tall everything above it is.
-Placement TryFaces(LovyanGFX& canvas, const Layout& layout, int count,
+Placement TrySizes(LovyanGFX& canvas, const Layout& layout, int count,
                    int emphasisIndex, int supportIndex)
 {
-  canvas.setFont(FontLadder[emphasisIndex]);
-  const int emphasisHeight = canvas.fontHeight();
-  const int headingWidth = canvas.textWidth(layout.heading);
-  const int addressWidth = canvas.textWidth(layout.address);
+  const int emphasisHeight = SizeLadder[emphasisIndex];
+  const int headingWidth = SmoothText::Width(canvas, layout.heading, emphasisHeight);
+  const int addressWidth = SmoothText::Width(canvas, layout.address, emphasisHeight);
 
-  canvas.setFont(FontLadder[supportIndex]);
-  const int supportHeight = canvas.fontHeight();
+  const int supportHeight = SizeLadder[supportIndex];
 
   Placement placement = Place(layout, emphasisHeight, supportHeight, count);
 
@@ -205,7 +202,7 @@ Placement TryFaces(LovyanGFX& canvas, const Layout& layout, int count,
   for (const String& line : layout.lines) {
     if (line.isEmpty())
       continue;
-    fits = fits && ClearsBezel(canvas.textWidth(line), y, supportHeight);
+    fits = fits && ClearsBezel(SmoothText::Width(canvas, line, supportHeight), y, supportHeight);
     y += placement.linePitch;
   }
 
@@ -219,26 +216,26 @@ void DrawLayout(LGFX& tft, const Layout& layout)
 
   const int count = CountLines(layout);
 
-  // The ladder is walked at scale 1 throughout -- picking a bigger face is what
+  // Measuring is done at scale 1 throughout -- picking a bigger size is what
   // this does instead of multiplying a small one.
   canvas.setTextSize(1);
 
   // Every pairing, largest first, emphasis before support: sixteen tries at
   // worst, once per screen. Written as a search rather than as two independent
-  // choices because the two are not independent -- a bigger emphasis face
+  // choices because the two are not independent -- a bigger emphasis size
   // pushes the supporting lines further down the panel, where the curve leaves
   // them less width than they had.
   //
   // Support is never allowed above emphasis. A screen whose small print is set
   // larger than its heading is not a screen that has fitted itself to the
   // panel; it is one that has forgotten what it is saying.
-  int emphasisIndex = SmallestFontIndex;
-  int supportIndex = SmallestFontIndex;
+  int emphasisIndex = SmallestSizeIndex;
+  int supportIndex = SmallestSizeIndex;
   Placement placement;
 
   for (int emphasis = 0; emphasis < LadderSize && !placement.valid; emphasis++) {
     for (int support = emphasis; support < LadderSize; support++) {
-      const Placement candidate = TryFaces(canvas, layout, count, emphasis, support);
+      const Placement candidate = TrySizes(canvas, layout, count, emphasis, support);
       if (candidate.valid) {
         emphasisIndex = emphasis;
         supportIndex = support;
@@ -249,42 +246,51 @@ void DrawLayout(LGFX& tft, const Layout& layout)
   }
 
   if (!placement.valid) {
-    // Nothing in the ladder fit. The smallest face is drawn anyway and allowed
+    // Nothing in the ladder fit. The smallest size is drawn anyway and allowed
     // to overrun the bezel -- a line clipped at the rim is still worth more to
     // whoever is reading it than a blank screen.
-    placement = TryFaces(canvas, layout, count, SmallestFontIndex, SmallestFontIndex);
+    placement = TrySizes(canvas, layout, count, SmallestSizeIndex, SmallestSizeIndex);
   }
 
+  constexpr uint32_t ink = lgfx::color888(0, 255, 0);
+
   canvas.fillScreen(lgfx::color888(0, 0, 0));
-  canvas.setTextColor(lgfx::color888(0, 255, 0));
 
-  canvas.setFont(FontLadder[emphasisIndex]);
   if (!layout.heading.isEmpty())
-    canvas.drawCentreString(layout.heading, SCREEN_SIZE_DIV_2, placement.headingTop);
+    SmoothText::DrawCentre(canvas, layout.heading, SCREEN_SIZE_DIV_2,
+                           placement.headingTop, SizeLadder[emphasisIndex], ink);
   if (!layout.address.isEmpty())
-    canvas.drawCentreString(layout.address, SCREEN_SIZE_DIV_2, placement.addressTop);
+    SmoothText::DrawCentre(canvas, layout.address, SCREEN_SIZE_DIV_2,
+                           placement.addressTop, SizeLadder[emphasisIndex], ink);
 
+  // Drawn straight onto the canvas at whole pixels per module, never through
+  // the resample the text goes through: a code is read by a machine looking for
+  // a grid, and softening the edge of every module is the one thing that helps
+  // a letterform and hurts a badge.
   if (layout.badgeSize > 0)
     ConfigQr::Draw(canvas,
                    (SCREEN_SIZE - layout.badgeSize) / 2,
                    placement.badgeTop,
                    layout.badgeSize);
 
-  canvas.setFont(FontLadder[supportIndex]);
   int y = placement.firstLineTop;
   for (const String& line : layout.lines) {
     if (line.isEmpty())
       continue;
-    canvas.drawCentreString(line, SCREEN_SIZE_DIV_2, y);
+    SmoothText::DrawCentre(canvas, line, SCREEN_SIZE_DIV_2, y,
+                           SizeLadder[supportIndex], ink);
     y += placement.linePitch;
   }
 
   PanelTrim::Present(tft);
 
   // Everything else that draws on this canvas expects the default face at the
-  // default scale. Reset on the canvas rather than on the panel, because with a
-  // trim set those are different objects and the panel's own text state is
-  // never touched by anything here.
+  // default scale. Nothing here sets a face on it any more -- the runs are
+  // composed elsewhere and copied in -- but SmoothText falls back to drawing on
+  // the canvas directly when it cannot get a buffer, so the reset stays. Done
+  // on the canvas rather than on the panel, because with a trim set those are
+  // different objects and the panel's own text state is never touched by
+  // anything here.
   canvas.setFont(&fonts::Font0);
   canvas.setTextSize(1);
 }
