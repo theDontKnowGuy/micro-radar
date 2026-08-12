@@ -351,7 +351,17 @@ id and secret into the configuration page. The radar does not fall back to OpenS
 anonymous access, which is counted per public IP address rather than per device — it
 would be shared with everything else behind the same router and allows a tenth of the
 requests, roughly one refresh every three and a half minutes against one every twenty
-seconds. Route labels use [ADSBDB](https://www.adsbdb.com/), and center surface wind
+seconds.
+
+Because there is no fallback, anything wrong with the credentials shows up as an
+empty face — so the radar says which thing it is. After three fetches in a row
+come back with nothing, a *NO AIRCRAFT DATA* line appears above the centre with
+the reason under it: the key was refused, OpenSky could not be reached, or the
+day's request allowance is spent. The same reason goes to the diagnostics
+dashboard if it is switched on. An empty sweep with no notice on it means the
+fetches are landing and there is genuinely nothing in the airspace.
+
+Route labels use [ADSBDB](https://www.adsbdb.com/), and center surface wind
 uses [Open-Meteo](https://open-meteo.com/). Place search uses [Nominatim](https://nominatim.org/),
 and approximate location uses [IPWhoIs](https://ipwhois.io/).
 

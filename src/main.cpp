@@ -14,7 +14,6 @@
 #include "ui/BootScreen.h"
 #include "ui/FrameTimer.h"
 #include "ui/PanelTrim.h"
-#include "ui/QrScreen.h"
 #include "ui/RadarSweep.h"
 #include "ui/StatusScreen.h"
 #include "ui/UpdateScreen.h"
@@ -166,11 +165,6 @@ void setup()
   WiFiConnection::BeginJoin(configServer);
   BootScreen::Hold(tft, bootStartedAt, WiFiConnection::JoinPending, WiFiConnection::JoinTimeoutMs);
 
-  // Straight after the logo, and before the join is looked at, so it shows on
-  // every boot rather than only on the ones that find a network -- a radar that
-  // cannot join is the one whose owner most wants the project page.
-  QrScreen::Show(tft);
-
   // No network, and no way to be configured except by serving the page over an
   // access point of the radar's own; that does not return.
   if (!WiFiConnection::FinishJoin())
@@ -240,12 +234,16 @@ void setup()
   // things to type. The fallback line carries the bare IP rather than a second
   // http:// -- ShowStatusScreen sizes the type to the longest line, and the
   // scheme twice would cost a step of size for something already said above.
-  ShowStatusScreen(tft,
-                   "Configure me at:",
-                   mdnsUrl,
-                   "or " + WiFi.localIP().toString(),
-                   "",
-                   "v" FIRMWARE_VERSION);
+  //
+  // The QR code for the project page rides along on the top of this screen
+  // rather than taking one of its own. It is the same seven seconds either way,
+  // and this is the one screen whose audience is already holding a phone.
+  ShowStatusScreenWithQr(tft,
+                         "Configure me at:",
+                         mdnsUrl,
+                         "or " + WiFi.localIP().toString(),
+                         "",
+                         "v" FIRMWARE_VERSION);
 
   // Keep the address visible long enough to read while the asynchronous
   // configuration server is already available.

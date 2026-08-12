@@ -1,5 +1,6 @@
 #include "AircraftManager.h"
 
+#include "Diagnostics.h"
 #include "DisplayConfig.h" // SCREEN_SIZE / SCREEN_SIZE_DIV_2, per selected panel
 #include "ui/PanelTrim.h"
 
@@ -129,6 +130,40 @@ static_assert(
     CLOCK_SUFFIX_DX * CLOCK_SUFFIX_DX + CLOCK_SUFFIX_DY * CLOCK_SUFFIX_DY <
         CLOCK_FACE_CENTRE * CLOCK_FACE_CENTRE,
     "The AM/PM suffix falls outside the round face; shrink it or close the gap"
+);
+
+// Why the face is empty, when it is empty because the radar cannot get the data
+// rather than because there is nothing flying. Two lines: what is wrong on top,
+// and which part of it underneath, because "no aircraft data" alone does not
+// tell an owner whether to check their key, their router or the calendar.
+//
+// Above the centre rather than stacked under the update notice with everything
+// else: the bottom of the face already carries three rows in the space the
+// clock does not, and this is the one label that is only ever on screen when the
+// radar has nothing else to draw. Sixteen characters of the default 6x8 face
+// measure 96 and the longest reason 144, so the width covers both.
+constexpr int FETCH_NOTICE_LINE_HEIGHT = 8;   // the default font, at size 1
+constexpr int FETCH_NOTICE_LINE_GAP = 4;
+constexpr int FETCH_NOTICE_WIDTH = 150;
+constexpr int FETCH_NOTICE_HEIGHT = 2 * FETCH_NOTICE_LINE_HEIGHT + FETCH_NOTICE_LINE_GAP;
+constexpr int FETCH_NOTICE_X = (SCREEN_SIZE - FETCH_NOTICE_WIDTH) / 2;
+constexpr int FETCH_NOTICE_Y = SCREEN_SIZE_DIV_2 - 44;
+
+// How many fetches in a row have to come back with nothing before the panel says
+// so. One failure is a router blinking; three at the fetch interval is a minute
+// of an empty face, which is long enough that the owner is already wondering.
+constexpr unsigned int FETCH_FAILURES_BEFORE_NOTICE = 3;
+
+// The same two constraints the clock is held to, for the same reason: neither is
+// visible by inspection, and the rows this sits in are shared with two labels
+// that move whenever their own sizing is touched.
+static_assert(
+    FETCH_NOTICE_Y > WIND_LABEL_Y + WIND_LABEL_HEIGHT,
+    "The fetch notice overlaps the wind report; move it down or shrink the rim labels"
+);
+static_assert(
+    FETCH_NOTICE_Y + FETCH_NOTICE_HEIGHT < CLOCK_LABEL_Y - CLOCK_CLEAR_PADDING,
+    "The fetch notice runs into the clock plate; move it up or shrink the digits"
 );
 
 // Before NTP answers, the system clock reads from the start of 1970. Anything
@@ -299,11 +334,19 @@ void AircraftManager::Initialise()
     // the interval no longer depends on whether a token can be had right now,
     // which is what used to pin a radar to the slow rate for the rest of its
     // run when the very first token request happened to fail.
+    //
+    // The reserve is not a rounding allowance. A radar spending 3997 of 4000
+    // credits has three left for everything the arithmetic does not model: a
+    // reboot, which fetches immediately and then keeps its own clock; a saved
+    // setting, which is another reboot; a release installing itself, which is a
+    // third. Any two of those in a day and the last fetches before midnight are
+    // refused -- which is a blank face for the rest of the evening, from a
+    // budget that was only ever notionally full.
     constexpr int MS_PER_DAY = 24 * 60 * 60 * 1000;
-    constexpr int AUTHED_TOKENS_PER_DAY = 4000;
-    constexpr int TOKEN_BUFFER = 3;
+    constexpr int AUTHED_CREDITS_PER_DAY = 4000;
+    constexpr int CREDIT_RESERVE = 200;
 
-    fetchInterval = MS_PER_DAY / (AUTHED_TOKENS_PER_DAY - TOKEN_BUFFER);
+    fetchInterval = MS_PER_DAY / (AUTHED_CREDITS_PER_DAY - CREDIT_RESERVE);
 
     networkStateMutex = xSemaphoreCreateMutex();
     if (networkStateMutex == nullptr) {
@@ -334,7 +377,15 @@ void AircraftManager::Update()
     ConsumeNetworkResults();
 
     const unsigned long now = millis();
+
+    // A radar OpenSky has refused for the day waits rather than carrying on at
+    // the normal interval: every request made while the credits are gone is one
+    // more that would have counted against them once they came back.
+    const bool holdingOffAfterRefusal =
+        fetchBackoffUntil != 0 && static_cast<long>(now - fetchBackoffUntil) < 0;
+
     if ((!hasScheduledFetch || now - lastFetch >= fetchInterval) &&
+        !holdingOffAfterRefusal &&
         ScheduleNetworkJob(NetworkJobType::FetchAircraft)) {
         lastFetch = now;
         hasScheduledFetch = true;
@@ -517,6 +568,11 @@ bool AircraftManager::ScheduleLabelLayout(const std::vector<RenderAircraft>& air
 
 void AircraftManager::RunAircraftFetch()
 {
+    // Set by every path below that ends without aircraft, in the words the panel
+    // draws. Empty means the fetch worked, which is also how the notice clears.
+    String failure;
+    unsigned long backoffMs = 0;
+
     const String token = authHandler.GetValidToken(openskyClientId, openskyClientSecret);
 
     // No unauthenticated fallback. OpenSky's anonymous allowance is counted per
@@ -526,9 +582,23 @@ void AircraftManager::RunAircraftFetch()
     // the rest of the day. setup() will not start the radar without credentials
     // stored, so an empty token here means the stored pair was rejected; the
     // token handler is already backing off, and this lets the fetch pass.
+    //
+    // The reason comes from the token handler rather than being invented here:
+    // it is the only thing that knows whether the pair was refused or the auth
+    // server could not be reached, and those two want different things done
+    // about them.
     if (token.isEmpty()) {
-        Serial.println("[WARN] No OpenSky token - skipping aircraft fetch");
-        PublishNetworkResult([] {});
+        failure = authHandler.LastError();
+        if (failure.isEmpty())
+            failure = "OpenSky login failed";
+
+        ReportFetchStatus(failure);
+        PublishNetworkResult([&] {
+            completedFetchFailure = failure;
+            completedFetchFailures = fetchFailureStreak;
+            completedFetchBackoffMs = 0;
+            fetchStatusReady = true;
+        });
         return;
     }
 
@@ -564,10 +634,32 @@ void AircraftManager::RunAircraftFetch()
         headers
     );
 
+    // Long enough that a radar refused for the day is not spending the next
+    // day's credits finding that out, short enough that one recovers by itself
+    // within the hour of whatever cleared it.
+    constexpr unsigned long RATE_LIMIT_BACKOFF_MS = 15UL * 60UL * 1000UL;
+
     std::vector<Aircraft> fetchedAircraft;
     bool fetchSucceeded = false;
     if (!IsSuccessful(result)) {
         LogRequestFailure("OpenSky API", result);
+
+        // Split by what the owner would have to do about it. A 429 is the one
+        // failure the radar itself causes, and the one it can make worse: the
+        // credits are gone for the day, and asking again every twenty seconds
+        // is how it stays that way.
+        if (result.statusCode == 429) {
+            failure = "OpenSky quota used up";
+            backoffMs = RATE_LIMIT_BACKOFF_MS;
+        } else if (result.statusCode == 401 || result.statusCode == 403) {
+            failure = "OpenSky login rejected";
+        } else if (result.statusCode != 0) {
+            char message[32];
+            snprintf(message, sizeof(message), "OpenSky error HTTP %d", result.statusCode);
+            failure = message;
+        } else {
+            failure = "OpenSky unreachable";
+        }
     } else {
         JsonDocument doc;
         const DeserializationError error = deserializeJson(doc, result.response);
@@ -576,15 +668,58 @@ void AircraftManager::RunAircraftFetch()
             fetchSucceeded = true;
         } else {
             LogParseFailure("OpenSky", error, "missing states array");
+            failure = "OpenSky sent bad data";
         }
     }
 
+    ReportFetchStatus(failure);
     PublishNetworkResult([&] {
         if (fetchSucceeded) {
             completedAircraftFetch.swap(fetchedAircraft);
             aircraftFetchReady = true;
         }
+        completedFetchFailure = failure;
+        completedFetchFailures = fetchFailureStreak;
+        completedFetchBackoffMs = backoffMs;
+        fetchStatusReady = true;
     });
+}
+
+void AircraftManager::ReportFetchStatus(const String& failure)
+{
+    // The dashboard is not a log tail. A radar with a rejected key fails every
+    // fetch for as long as it is switched on, and posting that at the fetch
+    // interval would bury everything else it has to say -- so a failure is
+    // reported when it starts, when it changes into a different one, and then
+    // once an hour for as long as it lasts.
+    constexpr unsigned long REPEAT_REPORT_INTERVAL_MS = 60UL * 60UL * 1000UL;
+    const unsigned long now = millis();
+
+    if (failure.isEmpty()) {
+        // Worth an event rather than a warning, and worth sending at all: on the
+        // dashboard this is the line that says when a unit came back, which is
+        // the other half of knowing when it went away.
+        if (fetchFailureStreak >= FETCH_FAILURES_BEFORE_NOTICE)
+            Diagnostics::Event("aircraft", "fetches recovered after %u failures",
+                               fetchFailureStreak);
+        fetchFailureStreak = 0;
+        reportedFetchFailure = "";
+        return;
+    }
+
+    ++fetchFailureStreak;
+
+    // Unsigned subtraction, like every other interval on this class: it is the
+    // form that stays correct across the millis() wrap.
+    if (failure == reportedFetchFailure &&
+        now - lastFetchFailureReport < REPEAT_REPORT_INTERVAL_MS)
+        return;
+
+    Diagnostics::Warn("no aircraft data: %s (%u fetches in a row)",
+                      failure.c_str(),
+                      fetchFailureStreak);
+    reportedFetchFailure = failure;
+    lastFetchFailureReport = now;
 }
 
 void AircraftManager::RunWindFetch()
@@ -767,6 +902,10 @@ void AircraftManager::ConsumeNetworkResults()
 {
     std::vector<Aircraft> fetchedAircraft;
     bool hasAircraftFetch = false;
+    String fetchFailure;
+    unsigned int fetchFailures = 0;
+    unsigned long fetchBackoffMs = 0;
+    bool hasFetchStatus = false;
     String routeIcao;
     String routeCallsign;
     String route;
@@ -784,6 +923,13 @@ void AircraftManager::ConsumeNetworkResults()
             fetchedAircraft.swap(completedAircraftFetch);
             aircraftFetchReady = false;
             hasAircraftFetch = true;
+        }
+        if (fetchStatusReady) {
+            fetchFailure = completedFetchFailure;
+            fetchFailures = completedFetchFailures;
+            fetchBackoffMs = completedFetchBackoffMs;
+            fetchStatusReady = false;
+            hasFetchStatus = true;
         }
         if (routeLookupReady) {
             routeIcao = completedRouteIcao;
@@ -838,6 +984,30 @@ void AircraftManager::ConsumeNetworkResults()
         for (auto& [icao, tracked] : trackedAircraft)
             if (presentIcaos.count(icao) == 0)
                 tracked.QueueRemoval();
+    }
+
+    if (hasFetchStatus) {
+        // The panel stays quiet through a single dropped fetch -- the previous
+        // aircraft are still on the face and still being dead-reckoned, so
+        // saying anything at that point would be wrong more often than right.
+        const String notice = fetchFailures >= FETCH_FAILURES_BEFORE_NOTICE ? fetchFailure : String();
+        if (notice != fetchFailureMessage) {
+            fetchFailureMessage = notice;
+            fetchNoticeVisible.store(!fetchFailureMessage.isEmpty());
+            // The notice is a region the label solver has to route around, so
+            // its appearing or clearing is a reason to solve again.
+            labelLayoutDirty = true;
+        }
+
+        if (fetchBackoffMs == 0) {
+            fetchBackoffUntil = 0;
+        } else {
+            // Zero is "not backing off", so a deadline that lands there on the
+            // millis() wrap is moved a millisecond rather than read as none.
+            fetchBackoffUntil = millis() + fetchBackoffMs;
+            if (fetchBackoffUntil == 0)
+                fetchBackoffUntil = 1;
+        }
     }
 
     if (hasRouteLookup && !route.isEmpty()) {
@@ -1124,6 +1294,7 @@ void AircraftManager::Draw(
     DrawClock(backbuffer);
     DrawLocationInfo(backbuffer);
     DrawUpdateNotice(backbuffer);
+    DrawFetchNotice(backbuffer);
 }
 
 void AircraftManager::DrawRadarCircles(LGFX_Sprite& backbuffer) const
@@ -1645,6 +1816,20 @@ void AircraftManager::SolveAircraftLabels(std::vector<RenderAircraft>& aircraft)
             addReservedLabelCost(updateBox);
         }
 
+        // Reserved even though the face is usually empty when this is up: a
+        // radar whose fetches have started failing still has its last set of
+        // aircraft on screen, dead-reckoned, and they are exactly what the
+        // notice explaining their staleness should not be drawn on top of.
+        if (fetchNoticeVisible) {
+            const LabelBox fetchBox = {
+                FETCH_NOTICE_X,
+                FETCH_NOTICE_Y,
+                FETCH_NOTICE_WIDTH,
+                FETCH_NOTICE_HEIGHT
+            };
+            addReservedLabelCost(fetchBox);
+        }
+
         for (size_t otherIndex = 0; otherIndex < aircraft.size(); ++otherIndex) {
             if (otherIndex == index)
                 continue;
@@ -2055,6 +2240,33 @@ void AircraftManager::DrawUpdateNotice(LGFX_Sprite& backbuffer) const
         "Update available",
         SCREEN_SIZE_DIV_2,
         UPDATE_LABEL_Y
+    );
+}
+
+void AircraftManager::DrawFetchNotice(LGFX_Sprite& backbuffer) const
+{
+    if (fetchFailureMessage.isEmpty())
+        return;
+
+    // Amber, on the same reasoning as the update notice: neither is radar data,
+    // and the green is what says something is being tracked. That matters more
+    // here than there -- this label is on screen precisely when nothing is.
+    backbuffer.setTextSize(1);
+    backbuffer.setTextColor(lgfx::color888(220, 150, 0));
+    backbuffer.drawCentreString(
+        "NO AIRCRAFT DATA",
+        SCREEN_SIZE_DIV_2,
+        FETCH_NOTICE_Y
+    );
+
+    // Dimmer than the line above it: the top line is what is wrong, this one is
+    // the detail, and an owner reading the face from across a room should get
+    // them in that order.
+    backbuffer.setTextColor(lgfx::color888(150, 100, 0));
+    backbuffer.drawCentreString(
+        fetchFailureMessage.c_str(),
+        SCREEN_SIZE_DIV_2,
+        FETCH_NOTICE_Y + FETCH_NOTICE_LINE_HEIGHT + FETCH_NOTICE_LINE_GAP
     );
 }
 

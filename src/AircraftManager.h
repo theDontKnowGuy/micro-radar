@@ -84,6 +84,25 @@ private:
     unsigned long fetchInterval = 0;
     unsigned long lastFetch = 0;
     bool hasScheduledFetch = false;
+
+    // Render-loop side of the fetch health below. The message is what the panel
+    // draws, empty while the fetches are landing; the deadline holds the next
+    // one off after OpenSky has said the day's credits are gone, because
+    // carrying on at the normal interval is what keeps a 429 coming.
+    String fetchFailureMessage;
+    unsigned long fetchBackoffUntil = 0;
+
+    // Read by the label-layout worker, which reserves the notice's region so a
+    // data block is not placed under it, and written by the render loop. Atomic
+    // for the same reason updateNoticeVisible is.
+    std::atomic<bool> fetchNoticeVisible{false};
+
+    // Worker-task side, touched only from RunAircraftFetch and what it calls.
+    // The streak decides when the panel speaks up; the other two keep a stuck
+    // radar from posting the same line to the dashboard every twenty seconds.
+    unsigned int fetchFailureStreak = 0;
+    String reportedFetchFailure;
+    unsigned long lastFetchFailureReport = 0;
     unsigned long lastWindFetch = 0;
     unsigned long lastWindUpdate = 0;
     bool hasScheduledWindFetch = false;
@@ -118,6 +137,13 @@ private:
 
     std::vector<Aircraft> completedAircraftFetch;
     bool aircraftFetchReady = false;
+    // Published by every aircraft fetch, whether or not it produced aircraft --
+    // a fetch that failed has something to say and no aircraft to say it with,
+    // which is the whole reason an empty face used to be unreadable.
+    String completedFetchFailure;
+    unsigned int completedFetchFailures = 0;
+    unsigned long completedFetchBackoffMs = 0;
+    bool fetchStatusReady = false;
     String completedRouteIcao;
     String completedRouteCallsign;
     String completedRoute;
@@ -151,6 +177,7 @@ private:
     void DrawClock(LGFX_Sprite& backbuffer) const;
     void DrawLocationInfo(LGFX_Sprite& backbuffer) const;
     void DrawUpdateNotice(LGFX_Sprite& backbuffer) const;
+    void DrawFetchNotice(LGFX_Sprite& backbuffer) const;
     void DrawAircraftRadarVector(LGFX_Sprite& backbuffer, int x, int y, const TrackedAircraft& tracked) const;
     void DrawAircraftTriangle(LGFX_Sprite& backbuffer, int x, int y, const TrackedAircraft& tracked) const;
     void ResolveNextDestination();
@@ -180,6 +207,11 @@ private:
     bool ScheduleLabelLayout(const std::vector<RenderAircraft>& aircraft);
     void ConsumeNetworkResults();
     void RunAircraftFetch();
+
+    // Runs on the worker task at the end of every aircraft fetch. Counts the
+    // streak and decides whether this failure is worth another line on the
+    // diagnostics dashboard; an empty argument means the fetch worked.
+    void ReportFetchStatus(const String& failure);
     void RunWindFetch();
     void RunTimezoneFetch();
     void RunDestinationLookup(const String& icao, const String& callsign);

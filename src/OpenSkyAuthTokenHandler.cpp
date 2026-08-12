@@ -1,4 +1,5 @@
 #include "OpenSkyAuthTokenHandler.h"
+#include "Diagnostics.h"
 #include <ArduinoJson.h>
 
 String OpenSkyAuthTokenHandler::FetchBearerToken(const String& url, const String& clientId, const String& clientSecret)
@@ -18,9 +19,27 @@ String OpenSkyAuthTokenHandler::FetchBearerToken(const String& url, const String
         }
     );
 
+    // Through Diagnostics rather than Serial from here down. A radar that
+    // cannot authenticate shows an empty face, and an empty face is exactly the
+    // state nobody can debug over a USB cable that is not plugged in -- these
+    // are the four lines that say why, so they are the four that have to reach
+    // the dashboard.
     if (!resp.success) {
-        Serial.print("[ERROR] OpenSky token request failed: ");
-        Serial.println(resp.errorMessage);
+        Diagnostics::Warn("OpenSky token request failed: %s", resp.errorMessage.c_str());
+        lastError = "OpenSky auth unreachable";
+        return "";
+    }
+
+    // Checked before the body is parsed, because HttpRequestManager counts any
+    // answer at all as a success. A rejected pair comes back as a 401 carrying a
+    // JSON error object, which parses cleanly and has no access_token in it --
+    // so without this the one failure an owner can actually fix reported itself
+    // as a malformed response.
+    if (resp.statusCode < 200 || resp.statusCode >= 300) {
+        Diagnostics::Warn("OpenSky rejected the stored credentials (HTTP %d)", resp.statusCode);
+        lastError = resp.statusCode == 401 || resp.statusCode == 403
+            ? "OpenSky login rejected"
+            : "OpenSky auth error";
         return "";
     }
 
@@ -28,17 +47,19 @@ String OpenSkyAuthTokenHandler::FetchBearerToken(const String& url, const String
     DeserializationError error = deserializeJson(doc, resp.response);
 
     if (error) {
-        Serial.print("[ERROR] OpenSky token response JSON parse failed: ");
-        Serial.println(error.f_str());
+        Diagnostics::Warn("OpenSky token response JSON parse failed: %s", error.c_str());
+        lastError = "Bad reply from OpenSky";
         return "";
     }
 
     const JsonVariant token = doc["access_token"];
     if (!token.is<String>()) {
-        Serial.println("[WARN] Missing or non-string 'access_token' in OpenSky API response");
+        Diagnostics::Warn("Missing or non-string 'access_token' in OpenSky API response");
+        lastError = "Bad reply from OpenSky";
         return "";
     }
 
+    lastError = "";
     return token.as<String>();
 }
 
@@ -51,8 +72,10 @@ String OpenSkyAuthTokenHandler::GetValidToken(const String& clientId, const Stri
     // single aircraft fetch, because a failed fetch leaves no token to cache.
     constexpr unsigned long FAILURE_BACKOFF_MS = 5UL * 60UL * 1000UL;
 
-    if (clientId.isEmpty() || clientSecret.isEmpty())
+    if (clientId.isEmpty() || clientSecret.isEmpty()) {
+        lastError = "No OpenSky key stored";
         return "";
+    }
 
     // Subtract-then-compare rather than `millis() > deadline`: millis() wraps
     // after 49.7 days, and the plain comparison reads every token as expired
