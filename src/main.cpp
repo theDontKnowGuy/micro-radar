@@ -14,6 +14,7 @@
 #include "ui/BootScreen.h"
 #include "ui/FrameTimer.h"
 #include "ui/PanelTrim.h"
+#include "ui/QrScreen.h"
 #include "ui/RadarSweep.h"
 #include "ui/StatusScreen.h"
 #include "ui/UpdateScreen.h"
@@ -42,10 +43,14 @@ bool alignmentTestEnabled = false;
 // router -- and gets a tenth of the refresh rate for it. Better to say so on
 // the panel than to sweep once every three and a half minutes and look broken.
 //
-// Blocking, on the same reasoning as the setup portal: nothing else can
-// usefully run, loop() is never reached, and the only way out is the reboot
-// that saving the page asks for. The configuration server is already up and
-// answering on its own task by the time this is called.
+// Blocking, on the same reasoning as the setup portal: nothing that draws on
+// the panel can usefully run, loop() is never reached, and the way out is the
+// reboot that saving the page asks for. What does run is everything that had
+// been started before the hold -- the configuration server on its own task, the
+// diagnostics agent, and the update checker -- which is why this is called
+// after all three rather than in place of them. A radar held here is the one
+// that most needs to stay reachable: it is not showing anyone anything, so a
+// release that fixes whatever put it here has to be able to land by itself.
 [[noreturn]] void RunOpenSkySetupHold(const String& mdnsUrl)
 {
   Serial.println("No OpenSky credentials stored - holding at the configuration screen");
@@ -53,16 +58,37 @@ bool alignmentTestEnabled = false;
 
   // Same shape as the address screen below, with the reason on top: whoever is
   // looking at this has already set the radar up once, so the line that matters
-  // is the one saying what is still missing.
-  ShowStatusScreen(tft,
-                   "OpenSky key",
-                   "needed",
-                   mdnsUrl,
-                   "or " + WiFi.localIP().toString(),
-                   "v" FIRMWARE_VERSION);
+  // is the one saying what is still missing. A lambda because the update path
+  // below has to put it back, and two copies of five lines would drift.
+  const auto showHoldScreen = [&mdnsUrl] {
+    ShowStatusScreen(tft,
+                     "OpenSky key",
+                     "needed",
+                     mdnsUrl,
+                     "or " + WiFi.localIP().toString(),
+                     "v" FIRMWARE_VERSION);
+  };
+
+  showHoldScreen();
 
   while (!configServer.RestartRequested()) {
     Diagnostics::Poll();
+
+    // The same handover loop() does, less the aircraft network task -- there is
+    // no such task yet, which leaves the diagnostics agent as the only other
+    // claim on the heap a TLS session needs. setup() runs on the Arduino loop
+    // task, so Install()'s "from the render loop, not a background task" is
+    // satisfied here for the same reason it is there.
+    if (firmwareUpdater.UpdatePending()) {
+      Diagnostics::PauseForUpdate();
+      UpdateScreen::RunFirmwareUpdate(tft, firmwareUpdater);
+
+      // Not reached in practice -- every path out of an install ends in a
+      // reboot. Should one ever return, the address goes back up rather than
+      // leaving a finished progress bar on the panel with nothing to say.
+      showHoldScreen();
+    }
+
     delay(2);
   }
 
@@ -140,6 +166,11 @@ void setup()
   WiFiConnection::BeginJoin(configServer);
   BootScreen::Hold(tft, bootStartedAt, WiFiConnection::JoinPending, WiFiConnection::JoinTimeoutMs);
 
+  // Straight after the logo, and before the join is looked at, so it shows on
+  // every boot rather than only on the ones that find a network -- a radar that
+  // cannot join is the one whose owner most wants the project page.
+  QrScreen::Show(tft);
+
   // No network, and no way to be configured except by serving the page over an
   // access point of the radar's own; that does not return.
   if (!WiFiConnection::FinishJoin())
@@ -176,6 +207,18 @@ void setup()
   Serial.print(" or ");
   Serial.println(configurationUrl);
 
+  // Start polling GitHub for new firmware. Needs Wi-Fi, so it goes after the
+  // join; the checker delays its first look by a couple of minutes. Whether a
+  // find installs itself or waits for the owner is read here rather than per
+  // check -- saving the setting reboots the radar anyway.
+  //
+  // Ahead of the OpenSky hold below, and so ahead of the radar itself: a unit
+  // that never gets its credentials would otherwise sit there unreachable by
+  // any release, which is the one state where self-updating matters most.
+  const String autoUpdateSetting = configServer.GetStoredString("auto-update");
+  firmwareUpdater.SetAutoInstall(autoUpdateSetting != "false");
+  firmwareUpdater.Initialise();
+
   // Ahead of the address screen rather than after it: the hold puts the same
   // address up with the reason above it, so showing the seven-second version
   // first would only delay the one that says what is wrong. Both fields are
@@ -210,14 +253,6 @@ void setup()
 
   // initialise aircraft manager
   aircraftManager.Initialise();
-
-  // Start polling GitHub for new firmware. Needs Wi-Fi, so it goes after the
-  // join; the checker delays its first look by a couple of minutes. Whether a
-  // find installs itself or waits for the owner is read here rather than per
-  // check -- saving the setting reboots the radar anyway.
-  const String autoUpdateSetting = configServer.GetStoredString("auto-update");
-  firmwareUpdater.SetAutoInstall(autoUpdateSetting != "false");
-  firmwareUpdater.Initialise();
 
   sweepSettings = RadarSweep::LoadSettings(configServer);
   alignmentTestEnabled = configServer.GetStoredString("alignment-test") == "true";

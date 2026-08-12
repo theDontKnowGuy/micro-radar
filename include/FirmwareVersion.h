@@ -9,7 +9,7 @@
 //
 // Format is MAJOR.MINOR.PATCH. FirmwareUpdater compares the three components
 // numerically rather than as text, so 1.10.0 correctly sorts above 1.9.0.
-#define FIRMWARE_VERSION "1.8.0"
+#define FIRMWARE_VERSION "0.8.0"
 
 // When this version was published, and what changed in it. Both are shown on
 // the configuration page so the running firmware can describe itself, which
