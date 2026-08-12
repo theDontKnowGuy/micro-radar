@@ -8,11 +8,9 @@
 namespace ConfigQr {
 namespace {
 
-// A QR is read off the contrast between its modules, so it goes on white and
-// stays black -- not the panel's green on black. A phone will read an inverted
-// code, but only the ones that think to try.
-constexpr uint32_t PLATE_COLOR = lgfx::color888(255, 255, 255);
-constexpr uint32_t MODULE_COLOR = lgfx::color888(0, 0, 0);
+// Match the rest of the panel UI: green modules on a black plate.
+constexpr uint32_t PLATE_COLOR = lgfx::color888(0, 0, 0);
+constexpr uint32_t MODULE_COLOR = lgfx::color888(0, 255, 0);
 
 // The code plus the clear space it needs on all four sides. Both come from the
 // generated header, so a longer address -- which would mean a bigger version
