@@ -5,7 +5,8 @@
 #   scripts/release.sh
 #
 # Builds every release environment, publishes the binaries as a GitHub release
-# tagged from FIRMWARE_VERSION, and attaches the manifest.json that devices poll.
+# tagged from FIRMWARE_VERSION, attaches the manifest.json that devices poll,
+# and creates the symbol package ESP Insights needs to decode address-based logs.
 #
 # Version, release date and notes all come from include/FirmwareVersion.h and
 # nowhere else -- edit them there, commit, then run this with no arguments. That
@@ -51,6 +52,33 @@ size_of() {
     else
         stat -c%s "$1"
     fi
+}
+
+validate_insights_package() {
+    package="$1"
+    python3 - "$package" <<'PY'
+import sys
+import zipfile
+
+required = {
+    "firmware/firmware.bin",
+    "firmware/firmware.elf",
+    "firmware/firmware.map",
+    "firmware/partitions.csv",
+    "firmware/project_build_config.json",
+    "firmware/bootloader/firmware.bootloader.bin",
+    "firmware/partition_table/firmware.partitions.bin",
+}
+
+with zipfile.ZipFile(sys.argv[1]) as archive:
+    names = set(archive.namelist())
+
+missing = sorted(required - names)
+if missing:
+    raise SystemExit(
+        "ESP Insights package is missing: " + ", ".join(missing)
+    )
+PY
 }
 
 command -v gh >/dev/null 2>&1 || die "gh CLI not found"
@@ -117,6 +145,14 @@ for env in $RELEASE_ENVS; do
     src="$ROOT/.pio/build/$env/firmware.bin"
     [ -f "$src" ] || die "no firmware.bin for $env"
     cp "$src" "$STAGING/micro-radar-$env-$VERSION.bin"
+
+    echo "==> Packaging ESP Insights symbols for $env"
+    "$PIO" run --project-dir "$ROOT" -e "$env" -t insights
+    insights_src="$ROOT/.pio/build/$env/firmware.zip"
+    [ -f "$insights_src" ] || die "no ESP Insights package for $env"
+    validate_insights_package "$insights_src"
+    cp "$insights_src" \
+        "$STAGING/micro-radar-$env-$VERSION-esp-insights.zip"
 done
 
 echo "==> Writing manifest"
@@ -159,6 +195,7 @@ gh release create "$TAG" \
     --title "$TAG" \
     --notes "$NOTES" \
     "$STAGING"/*.bin \
+    "$STAGING"/*-esp-insights.zip \
     "$MANIFEST"
 
 echo

@@ -234,7 +234,10 @@ scripts/release.sh
 ```
 
 That builds every release environment, tags the commit, computes the digests,
-writes the manifest, and publishes it all as a GitHub release. Everything is
+writes the manifest, creates an ESP Insights symbol package for each build, and
+publishes it all as a GitHub release. Upload the matching
+`*-esp-insights.zip` asset in the ESP Insights dashboard so address-based logs
+and crash backtraces can be decoded. Everything is
 read back out of the header rather than passed on the command line, so what is
 compiled into the binary and what the manifest advertises cannot drift apart —
 and the radar can describe itself offline. The script refuses to publish if

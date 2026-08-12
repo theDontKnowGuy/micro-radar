@@ -40,10 +40,17 @@ def generate_insights_package(source, target, env):
     shutil.copy2(partitions_bin, generated_partitions)
     shutil.copy2(partitions_csv, generated_csv)
 
-    generator = os.path.expanduser(
-        "~/.platformio/packages/"
-        "framework-arduinoespressif32@src-be081158b8eddfb860d06ee01647245d/"
-        "tools/gen_insights_package.py"
+    # Resolve the framework selected by PlatformIO instead of pinning a package
+    # cache directory. PlatformIO may install it either under the plain package
+    # name or a source-revision-suffixed name, and that is an implementation
+    # detail which changes independently of this project.
+    framework_dir = env.PioPlatform().get_package_dir(
+        "framework-arduinoespressif32"
+    )
+    generator = (
+        os.path.join(framework_dir, "tools", "gen_insights_package.py")
+        if framework_dir
+        else ""
     )
 
     if not os.path.isfile(generator):
@@ -59,12 +66,12 @@ def generate_insights_package(source, target, env):
         generator,
         build_dir,
         "firmware",
-        project_dir,
+        build_dir,
     ])
 
     print("")
     print("ESP Insights package created:")
-    print(os.path.join(project_dir, "firmware.zip"))
+    print(os.path.join(build_dir, "firmware.zip"))
 
 
 # This is deliberately a separate target rather than a post-build hook.
