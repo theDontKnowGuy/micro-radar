@@ -8,6 +8,12 @@
 
 // Maps to OpenSky /states/all response
 // Field indices match the documented state vector array order
+//
+// The array ends at [16]. A seventeenth element, the aircraft category, is
+// appended only when the request carries extended=1, which this firmware does
+// not send -- it is not free to widen every state vector for a field that came
+// back as "no info" for every aircraft in the airspace when it was measured.
+// Anything reading state[17] against a plain request reads past the end.
 struct Aircraft {
     String icao24;          // [0]  unique ICAO 24-bit transponder address
     String callsign;        // [1]  flight callsign (8 chars), may be null
@@ -26,7 +32,6 @@ struct Aircraft {
     String squawk;          // [14] transponder squawk code
     bool   spi;             // [15] special purpose indicator flag
     int    positionSource;  // [16] 0=ADS-B, 1=ASTERIX, 2=MLAT, 3=FLARM
-    int    category;        // [17] aircraft category (0=unknown, see docs for full list)
 };
 
 namespace JsonParser {

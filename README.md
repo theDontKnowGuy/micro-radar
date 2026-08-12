@@ -291,10 +291,12 @@ Connect to it and the configuration page opens by itself; if your phone does not
 offer it, browse to the address shown on the radar's screen (`192.168.4.1`).
 
 It is the same page you get later over your own network, so the Wi-Fi details,
-the radar centre, the OpenSky credentials and the display options are all set in
-one go. Saving joins the network and starts the radar. Anything that needs the
-internet — place search, current location, the update check — is shown disabled
-until then, because the hotspot has no route to it.
+the radar centre and the display options are all set in one go. Saving joins the
+network and starts the radar. Anything that needs the internet — place search,
+current location, the update check — is shown disabled until then, because the
+hotspot has no route to it. The OpenSky section is hidden here for the same
+reason: its credentials come from a website the phone joined to the radar cannot
+open.
 
 Afterwards the radar shows a *Configure me at* screen with its address, and the
 same page is reachable from any device on the network:
@@ -304,6 +306,10 @@ http://microradar.local
 ```
 
 If mDNS is unavailable, use the IP address shown on screen, by the serial monitor, or by your router.
+
+Until OpenSky credentials have been entered on that page, the radar holds on an
+*OpenSky key needed* screen carrying the same address instead of starting its
+sweep. It has no aircraft to show without them — see below.
 
 A wrong password just brings the hotspot back on the next boot, with everything
 else you entered still stored.
@@ -334,12 +340,20 @@ hotspot — or simply restart it.
 Saving restarts the radar.
 
 A device with no stored settings starts centred on Ben Gurion Airport
-(32.002714, 34.880919), with the surface-wind readout and route labels both on,
-so the first boot shows real traffic before anything is configured. These defaults
-apply only to keys that have never been set — an already-configured radar keeps
-what it has, and a setting turned off stays off.
+(32.002714, 34.880919), with the surface-wind readout and route labels both on.
+These defaults apply only to keys that have never been set — an already-configured
+radar keeps what it has, and a setting turned off stays off. There is no default
+for the OpenSky credentials, which is the one thing every radar has to be given.
 
-An [OpenSky Network](https://opensky-network.org/) account is optional but provides a larger request allowance. Route labels use [ADSBDB](https://www.adsbdb.com/), and center surface wind uses [Open-Meteo](https://open-meteo.com/). Place search uses [Nominatim](https://nominatim.org/), and approximate location uses [IPWhoIs](https://ipwhois.io/).
+A free [OpenSky Network](https://opensky-network.org/) account is required: register,
+sign in, then create an API client under Account → API client, and paste the client
+id and secret into the configuration page. The radar does not fall back to OpenSky's
+anonymous access, which is counted per public IP address rather than per device — it
+would be shared with everything else behind the same router and allows a tenth of the
+requests, roughly one refresh every three and a half minutes against one every twenty
+seconds. Route labels use [ADSBDB](https://www.adsbdb.com/), and center surface wind
+uses [Open-Meteo](https://open-meteo.com/). Place search uses [Nominatim](https://nominatim.org/),
+and approximate location uses [IPWhoIs](https://ipwhois.io/).
 
 ## Remote diagnostics
 

@@ -73,6 +73,10 @@ private:
     bool displayDestination = false;
     bool displayWind = false;
     bool displayClock = false;
+    // Aircraft OpenSky reports as on_ground. Off by default: it is the setting
+    // that changes most with where the radar is pointed, and a face centred on
+    // an airport fills with parked aircraft the moment it is on.
+    bool displayGroundTraffic = false;
     ClockFormat clockFormat = ClockFormat::TwentyFourHour;
     String locationNameLabel;
     AircraftMarkerStyle aircraftMarkerStyle = AircraftMarkerStyle::RadarVector;

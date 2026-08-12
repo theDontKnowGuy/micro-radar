@@ -23,7 +23,9 @@ namespace JsonParser {
         a.squawk = state[14].isNull() ? "" : state[14].as<String>();
         a.spi = state[15].isNull() ? false : state[15].as<bool>();
         a.positionSource = state[16].isNull() ? 0 : state[16].as<int>();
-        a.category = state[17].isNull() ? 0 : state[17].as<int>();
+        // No state[17] here: see the note on the struct. It parsed to a null
+        // that the guard turned into a zero, so the field read as "category
+        // unknown" for every aircraft rather than as the absent element it was.
 
         return a;
     }

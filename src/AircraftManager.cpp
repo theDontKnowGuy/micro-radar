@@ -171,6 +171,18 @@ void LogParseFailure(const char* what, const DeserializationError& error, const 
                   what, error ? error.c_str() : missing);
 }
 
+// OpenSky sends the ICAO 24-bit address in lower case. Upper case is how it is
+// written everywhere it is read as an identifier, and it also stops a six digit
+// hex address from being mistaken for a lower case callsign at label size.
+// An empty address is left empty: there is nothing truthful to put there, and
+// an aircraft without one is not tracked in the first place.
+String IcaoDisplayLabel(const String& icao24)
+{
+    String label = icao24;
+    label.toUpperCase();
+    return label;
+}
+
 // Half the width the round face offers `dy` rows from its centre, less whatever
 // clearance the caller wants kept between its text and the rim. Same chord
 // StatusScreen works out for its own text, and needed here for the same reason:
@@ -254,6 +266,7 @@ void AircraftManager::Initialise()
     const String altitudeUnit = configServer.GetStoredString("altitude-unit");
     const String renderDestination = configServer.GetStoredString("destination");
     const String renderWind = configServer.GetStoredString("wind");
+    const String renderGroundTraffic = configServer.GetStoredString("ground-traffic");
     const String renderClock = configServer.GetStoredString("clock");
     const String clockFormatSetting = configServer.GetStoredString("clock-format");
     const String markerStyle = configServer.GetStoredString("aircraft-marker");
@@ -267,6 +280,7 @@ void AircraftManager::Initialise()
     if (!altitudeUnit.isEmpty()) displayAltitudeInFeet = altitudeUnit == "feet" || altitudeUnit == "kft";
     if (!renderDestination.isEmpty()) displayDestination = renderDestination == "true";
     if (!renderWind.isEmpty()) displayWind = renderWind == "true";
+    if (!renderGroundTraffic.isEmpty()) displayGroundTraffic = renderGroundTraffic == "true";
     if (!renderClock.isEmpty()) displayClock = renderClock == "true";
     clockFormat = clockFormatSetting == "12h"
         ? ClockFormat::TwelveHour
@@ -278,18 +292,18 @@ void AircraftManager::Initialise()
     else
         aircraftMarkerStyle = AircraftMarkerStyle::RadarVector;
 
-    // calculate how often we can call OpenSky API before being rate limited
+    // calculate how often we can call OpenSky API before being rate limited.
+    // One allowance to size this against, because credentials are required to
+    // get this far -- setup() holds the radar on the configuration screen until
+    // a pair has been stored. Nothing is asked of the auth server here either:
+    // the interval no longer depends on whether a token can be had right now,
+    // which is what used to pin a radar to the slow rate for the rest of its
+    // run when the very first token request happened to fail.
     constexpr int MS_PER_DAY = 24 * 60 * 60 * 1000;
-    constexpr int ANONYMOUS_TOKENS_PER_DAY = 400;
     constexpr int AUTHED_TOKENS_PER_DAY = 4000;
     constexpr int TOKEN_BUFFER = 3;
-    int dailyRequestBudget = ANONYMOUS_TOKENS_PER_DAY - TOKEN_BUFFER; // non-authed tokens minus buffer
 
-    const String token = authHandler.GetValidToken(openskyClientId, openskyClientSecret);
-    if (!token.isEmpty())
-        dailyRequestBudget = AUTHED_TOKENS_PER_DAY - TOKEN_BUFFER; // authed tokens minus buffer
-
-    fetchInterval = MS_PER_DAY / dailyRequestBudget;
+    fetchInterval = MS_PER_DAY / (AUTHED_TOKENS_PER_DAY - TOKEN_BUFFER);
 
     networkStateMutex = xSemaphoreCreateMutex();
     if (networkStateMutex == nullptr) {
@@ -504,17 +518,48 @@ bool AircraftManager::ScheduleLabelLayout(const std::vector<RenderAircraft>& air
 void AircraftManager::RunAircraftFetch()
 {
     const String token = authHandler.GetValidToken(openskyClientId, openskyClientSecret);
-    std::vector<std::pair<String, String>> headers;
-    if (!token.isEmpty())
-        headers.push_back({ "Authorization", "Bearer " + token });
 
+    // No unauthenticated fallback. OpenSky's anonymous allowance is counted per
+    // public address rather than per device, so a radar spending it at the
+    // authenticated interval would empty it in an hour -- taking every other
+    // device behind the same address down with it -- and then be refused for
+    // the rest of the day. setup() will not start the radar without credentials
+    // stored, so an empty token here means the stored pair was rejected; the
+    // token handler is already backing off, and this lets the fetch pass.
+    if (token.isEmpty()) {
+        Serial.println("[WARN] No OpenSky token - skipping aircraft fetch");
+        PublishNetworkResult([] {});
+        return;
+    }
+
+    const std::vector<std::pair<String, String>> headers = {
+        { "Authorization", "Bearer " + token }
+    };
+
+    // Positions are dead-reckoned between fetches, so an aircraft just outside
+    // the face when the snapshot is taken can belong on screen well before the
+    // next one arrives. Asking for a margin lets it enter at the rim instead of
+    // appearing out of nowhere once it is already inside.
+    //
+    // Capped at the half-width that keeps the box inside OpenSky's 25 square
+    // degree band: past that a request costs 2 credits instead of 1, which
+    // would halve the refresh rate to buy a wider margin.
+    constexpr double MAX_REQUEST_HALF_WIDTH = 2.5;
+    constexpr double REQUEST_MARGIN = 1.15;
+    const double requestRad = std::min(rad * REQUEST_MARGIN, MAX_REQUEST_HALF_WIDTH);
+
+    // Six decimals, not String()'s default two. The stored radius has six, and
+    // at the smallest selectable radius (3 km) rounding each edge to 0.01
+    // degrees asks for a box ~19% narrower per axis than the one being drawn --
+    // so the outer ring of the face could never be populated.
+    constexpr unsigned int COORDINATE_DECIMALS = 6;
     const HttpResult result = http.Get(
         "https://opensky-network.org/api/states/all",
         {
-            {"lamin", String(lat - rad)},
-            {"lamax", String(lat + rad)},
-            {"lomin", String(lon - rad)},
-            {"lomax", String(lon + rad)}
+            {"lamin", String(lat - requestRad, COORDINATE_DECIMALS)},
+            {"lamax", String(lat + requestRad, COORDINATE_DECIMALS)},
+            {"lomin", String(lon - requestRad, COORDINATE_DECIMALS)},
+            {"lomax", String(lon + requestRad, COORDINATE_DECIMALS)}
         },
         headers
     );
@@ -962,10 +1007,15 @@ void AircraftManager::Draw(
     renderAircraft.reserve(std::min(trackedAircraft.size(), MAX_LABELED_AIRCRAFT));
 
     constexpr int RADAR_CENTRE = SCREEN_SIZE_DIV_2 - 1;
-    const int markerRadius = aircraftMarkerStyle == AircraftMarkerStyle::RadarVector ? 11 : 7;
-    const int maxMarkerDistance = SCREEN_SIZE_DIV_2 - 1 - markerRadius;
+    // The cutoff is the face itself, not the face less a marker's width. Insetting
+    // it by the marker radius kept whole glyphs inside the rim, but it also meant
+    // the outer 11 px of the radar -- 6% of the configured radius, and the ring
+    // an arriving aircraft crosses first -- could never hold a target. A marker
+    // straddling the rim is clipped by the sprite, which is what a radar looks
+    // like; an aircraft that silently pops into being a third of the way in is not.
+    const int maxMarkerDistance = SCREEN_SIZE_DIV_2 - 1;
     auto getVisibleMarkerPosition = [&](const TrackedAircraft& tracked, int& x, int& y) {
-        if (!tracked.visibleOnRadar || tracked.state.onGround)
+        if (!tracked.visibleOnRadar || (tracked.state.onGround && !displayGroundTraffic))
             return false;
 
         const auto [predLat, predLon] = sweepEnabled
@@ -981,11 +1031,21 @@ void AircraftManager::Draw(
             maxMarkerDistance * maxMarkerDistance;
     };
 
+    // Ground traffic is deliberately excluded here even when it is being drawn:
+    // markers for it, never data blocks. An airport inside the face can hold
+    // more parked and taxiing aircraft than the whole label budget, and they
+    // would crowd out the airborne targets the budget exists to serve.
     for (auto& [icao, tracked] : trackedAircraft) {
-        if (!tracked.visibleOnRadar || tracked.state.onGround)
+        if (!tracked.visibleOnRadar)
             continue;
 
+        // Ticked before the ground test, not after: Tick() is what advances the
+        // blend towards a newly arrived position, and the marker loop below has
+        // no non-const access to do it. Skipping it here left taxiing aircraft
+        // parked at wherever they were one update ago.
         tracked.Tick();
+        if (tracked.state.onGround)
+            continue;
         int x = 0;
         int y = 0;
         if (!getVisibleMarkerPosition(tracked, x, y))
@@ -1037,6 +1097,15 @@ void AircraftManager::Draw(
         int y = 0;
         if (!getVisibleMarkerPosition(tracked, x, y))
             continue;
+
+        // Ground traffic gets one flat pip regardless of the chosen style. It
+        // has no meaningful track to point a vector at while it is manoeuvring
+        // on a taxiway, and drawing it dimmer than the airborne green keeps an
+        // airport from reading as the busiest patch of sky on the display.
+        if (tracked.state.onGround) {
+            backbuffer.fillCircle(x, y, 2, lgfx::color888(0, 90, 0));
+            continue;
+        }
 
         switch (aircraftMarkerStyle) {
             case AircraftMarkerStyle::RadarVector:
@@ -1092,7 +1161,16 @@ AircraftManager::RenderAircraft AircraftManager::BuildRenderAircraft(
     result.tracked = &tracked;
     result.x = x;
     result.y = y;
-    result.lines[result.lineCount++] = tracked.state.callsign;
+    // The callsign is a free-text Flight ID the crew types in, and plenty of
+    // aircraft transmit nothing at all in it -- state operators and parked
+    // airliners especially. Line 0 is the one the label solver protects from
+    // overlap, so leaving it empty spends that protection on a blank row and
+    // hangs the remaining lines off a marker with nothing naming it. The ICAO
+    // 24-bit address is always present and unique to the airframe, so it stands
+    // in: an identifier that is never wrong, rather than no identifier at all.
+    result.lines[result.lineCount++] = tracked.state.callsign.isEmpty()
+        ? IcaoDisplayLabel(tracked.state.icao24)
+        : tracked.state.callsign;
 
     if (displaySpeed && result.lineCount < 4) {
         String speedLabel;

@@ -35,6 +35,47 @@ RadarSweep::Settings sweepSettings;
 // radar, so there is nothing to be gained by watching it change.
 bool alignmentTestEnabled = false;
 
+// Holds the radar on the configuration address until OpenSky credentials have
+// been stored. There is no anonymous mode to fall back to any more: that
+// allowance is counted per public address rather than per device, so a radar
+// leaning on it spends an allowance shared with everything else behind the same
+// router -- and gets a tenth of the refresh rate for it. Better to say so on
+// the panel than to sweep once every three and a half minutes and look broken.
+//
+// Blocking, on the same reasoning as the setup portal: nothing else can
+// usefully run, loop() is never reached, and the only way out is the reboot
+// that saving the page asks for. The configuration server is already up and
+// answering on its own task by the time this is called.
+[[noreturn]] void RunOpenSkySetupHold(const String& mdnsUrl)
+{
+  Serial.println("No OpenSky credentials stored - holding at the configuration screen");
+  Diagnostics::Warn("no OpenSky credentials stored - waiting for configuration");
+
+  // Same shape as the address screen below, with the reason on top: whoever is
+  // looking at this has already set the radar up once, so the line that matters
+  // is the one saying what is still missing.
+  ShowStatusScreen(tft,
+                   "OpenSky key",
+                   "needed",
+                   mdnsUrl,
+                   "or " + WiFi.localIP().toString(),
+                   "v" FIRMWARE_VERSION);
+
+  while (!configServer.RestartRequested()) {
+    Diagnostics::Poll();
+    delay(2);
+  }
+
+  Serial.println("Settings saved - restarting");
+  ShowStatusScreen(tft, "Settings saved", "Restarting");
+  delay(1500);   // let the HTTP response finish going out
+  tft.waitDMA(); // make sure the panel bus is idle -- see loop()
+  ESP.restart();
+
+  while (true)
+    delay(1000); // ESP.restart() does not return, but it is not declared that way
+}
+
 void setup()
 {
   Serial.begin(115200);
@@ -134,6 +175,14 @@ void setup()
   Serial.print(mdnsUrl);
   Serial.print(" or ");
   Serial.println(configurationUrl);
+
+  // Ahead of the address screen rather than after it: the hold puts the same
+  // address up with the reason above it, so showing the seven-second version
+  // first would only delay the one that says what is wrong. Both fields are
+  // required -- a client id without its secret authenticates nothing.
+  if (configServer.GetStoredString("opensky-id").isEmpty() ||
+      configServer.GetStoredString("opensky-secret").isEmpty())
+    RunOpenSkySetupHold(mdnsUrl);
 
   // Once the radar starts updating itself the version on screen is the only way
   // to tell, at a glance, which build a given unit ended up on. Kept to the bare

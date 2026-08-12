@@ -18,6 +18,7 @@ public:
     ~OpenSkyAuthTokenHandler() = default;
 
     // Empty when no credentials are configured, or while backing off from a
-    // rejected one -- callers fall back to OpenSky's anonymous allowance.
+    // rejected pair. There is nothing to fall back to: OpenSky is not asked for
+    // aircraft without a token, so an empty return means the fetch is skipped.
     [[nodiscard]] String GetValidToken(const String& clientId, const String& clientSecret);
 };

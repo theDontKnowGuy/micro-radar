@@ -86,6 +86,7 @@ struct PageValues {
     String openskyClientId, openskySecretPlaceholder, geocoderUrl;
     String scanlineEnabled, sweepPeriod, speedEnabled, speedUnit;
     String altitudeEnabled, altitudeUnit, destinationEnabled, windEnabled;
+    String groundTrafficEnabled;
     String clockEnabled, clockFormat;
     String aircraftMarker, autoUpdate, screenTrim, alignmentTest;
     String insightsKeyPlaceholder, insightsLabel;
@@ -1101,6 +1102,13 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                                 </div>
 
                                 <div class="display-option">
+                                    <label class="display-toggle" for="ground-traffic">
+                                        <span>Show aircraft on the ground</span>
+                                        <input id="ground-traffic" name="ground-traffic" type="checkbox" %GROUND_TRAFFIC%>
+                                    </label>
+                                </div>
+
+                                <div class="display-option">
                                     <label class="display-toggle" for="wind">
                                         <span>Show center surface wind</span>
                                         <input id="wind" name="wind" type="checkbox" %WIND%>
@@ -1213,19 +1221,21 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                     </fieldset>
 
                     <!--
-                        Hidden on the setup hotspot: OpenSky cannot be reached
-                        from it, the anonymous allowance covers a first boot, and
-                        the credentials have to be fetched from a website the
-                        phone filling this in cannot open while it is joined to
-                        the radar. Hidden rather than removed, so its two fields
-                        still submit and keep whatever is already stored.
+                        Hidden on the setup hotspot: the credentials have to be
+                        fetched from a website the phone filling this in cannot
+                        open while it is joined to the radar, and OpenSky cannot
+                        be reached from the hotspot to check them. A first setup
+                        therefore ends with none stored, and the radar comes back
+                        up holding on its "OpenSky key needed" screen until this
+                        section -- visible once it is on the owner's own network
+                        -- has been filled in. Hidden rather than removed, so its
+                        two fields still submit and keep whatever is stored.
                     -->
                     <fieldset class="config-section" %OPENSKY_HIDDEN%>
                         <legend>OpenSky connection</legend>
                         <p class="section-note">
-                            Where the aircraft come from. Without credentials the radar uses the
-                            anonymous allowance, which is refreshed far less often. To get your own:
-                            register a free account at
+                            Where the aircraft come from, and required &mdash; the radar will not
+                            sweep without them. They are free: register an account at
                             <a href="https://opensky-network.org"
                                target="_blank" rel="noopener" class="underline">opensky-network.org</a>,
                             sign in, then Register. Open
@@ -2259,6 +2269,11 @@ void ConfigurationWebServer::EnsureDefaults() {
     ensureKey("destination", "true");
     ensureKey("wind", "true");
 
+    // Off by default. It is the one display setting whose usefulness depends
+    // entirely on what the radar is aimed at: pointed at an airport it doubles
+    // the number of targets on the face, most of them parked.
+    ensureKey("ground-traffic", "false");
+
     // Off by default: the clock is the largest thing on the face after the
     // radar itself, and a radar that shows one without being asked reads as a
     // clock with aircraft on it.
@@ -2342,6 +2357,7 @@ void ConfigurationWebServer::Initialise(FirmwareUpdater& updater, Mode serveMode
         values.altitudeUnit = prefs.getString("altitude-unit", "feet");
         values.destinationEnabled = prefs.getString("destination", "false");
         values.windEnabled = prefs.getString("wind", "false");
+        values.groundTrafficEnabled = prefs.getString("ground-traffic", "false");
         values.clockEnabled = prefs.getString("clock", "false");
         values.clockFormat = prefs.getString("clock-format", "24h");
         values.aircraftMarker = prefs.getString("aircraft-marker", "radar");
@@ -2445,6 +2461,7 @@ void ConfigurationWebServer::Initialise(FirmwareUpdater& updater, Mode serveMode
                 if (var == "ALTITUDE_METERS_SELECTED") return values.altitudeUnit == "meters" ? "selected" : "";
                 if (var == "DESTINATION")    return values.destinationEnabled == "true" ? "checked" : "";
                 if (var == "WIND")           return values.windEnabled == "true" ? "checked" : "";
+                if (var == "GROUND_TRAFFIC") return values.groundTrafficEnabled == "true" ? "checked" : "";
                 if (var == "CLOCK")          return values.clockEnabled == "true" ? "checked" : "";
                 if (var == "CLOCK_24H_SELECTED") return values.clockFormat != "12h" ? "selected" : "";
                 if (var == "CLOCK_12H_SELECTED") return values.clockFormat == "12h" ? "selected" : "";
@@ -2738,8 +2755,10 @@ void ConfigurationWebServer::Initialise(FirmwareUpdater& updater, Mode serveMode
         saveIfOneOf("auto-update", { "true", "false" });
 
         // Free text rather than a fixed set, so these two are stored whenever
-        // submitted -- including empty, which is how the OpenSky client id is
-        // cleared to go back to the anonymous allowance.
+        // submitted -- including empty. An empty client id is not rejected
+        // here: it is how a pair is cleared before a different one is entered,
+        // and a radar left with none simply holds on its "OpenSky key needed"
+        // screen after the restart rather than sweeping with nothing to show.
         const auto* openskyIdParam = request->getParam("opensky-id", true);
         if (openskyIdParam != nullptr)
             prefs.putString("opensky-id", openskyIdParam->value());
@@ -2811,6 +2830,8 @@ void ConfigurationWebServer::Initialise(FirmwareUpdater& updater, Mode serveMode
         prefs.putString("altitude", request->hasParam("altitude", true) ? "true" : "false");
         prefs.putString("destination", request->hasParam("destination", true) ? "true" : "false");
         prefs.putString("wind", request->hasParam("wind", true) ? "true" : "false");
+        prefs.putString("ground-traffic",
+                        request->hasParam("ground-traffic", true) ? "true" : "false");
         prefs.putString("clock", request->hasParam("clock", true) ? "true" : "false");
         prefs.putString("alignment-test", request->hasParam("alignment-test", true) ? "true" : "false");
         prefs.end();
