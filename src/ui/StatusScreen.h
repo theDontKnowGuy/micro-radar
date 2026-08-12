@@ -21,14 +21,20 @@ void ShowStatusScreen(LGFX& tft,
 //
 // The order is what the screen is for. The heading says what the thing below it
 // is, the code is the way anyone with a phone in their hand should take, and the
-// lines underneath are for everyone else -- and are what the code resolves to,
-// which is worth being able to see before scanning anything.
+// text is for everyone else -- and is what the code resolves to, which is worth
+// being able to see before scanning anything.
 //
-// The type comes out smaller than the plain version's. There is less room, and
-// less need: an address that can be scanned does not also have to be legible
-// from the other side of the room.
+// The arguments are in that order for a second reason: this screen is set in two
+// sizes, not one. `heading` and `address` get the largest face they both fit in,
+// and `fallback` and `footnote` get the largest face *they* fit in, which on a
+// round panel is usually a step smaller -- a numeric address with a scheme in
+// front of it is half again as wide as the name it stands in for.
+//
+// That split is the whole point. Sized as one block, a single over-long line
+// takes every other line down with it, and the address nobody can read is the
+// one they were meant to read first.
 void ShowQrAddressScreen(LGFX& tft,
                          const String& heading,
-                         const String& first,
-                         const String& second = "",
-                         const String& third = "");
+                         const String& address,
+                         const String& fallback = "",
+                         const String& footnote = "");
