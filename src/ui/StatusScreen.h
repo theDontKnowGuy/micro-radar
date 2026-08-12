@@ -16,17 +16,19 @@ void ShowStatusScreen(LGFX& tft,
                       const String& fourth = "",
                       const String& fifth = "");
 
-// The same screen with the project's QR code across the top of it, and the
-// lines fitted into what is left underneath.
+// The address screen: a heading, the radar's address as a QR code under it, and
+// the same address in text under that.
 //
-// For the address screen, which is where someone is already looking at the
-// panel with a phone in their hand. The type comes out smaller than the plain
-// version's, deliberately: the badge is what the top of the panel is for now,
-// and an address anyone can reach by scanning does not need to be legible from
-// the other side of the room as well.
-void ShowStatusScreenWithQr(LGFX& tft,
-                            const String& first,
-                            const String& second = "",
-                            const String& third = "",
-                            const String& fourth = "",
-                            const String& fifth = "");
+// The order is what the screen is for. The heading says what the thing below it
+// is, the code is the way anyone with a phone in their hand should take, and the
+// lines underneath are for everyone else -- and are what the code resolves to,
+// which is worth being able to see before scanning anything.
+//
+// The type comes out smaller than the plain version's. There is less room, and
+// less need: an address that can be scanned does not also have to be legible
+// from the other side of the room.
+void ShowQrAddressScreen(LGFX& tft,
+                         const String& heading,
+                         const String& first,
+                         const String& second = "",
+                         const String& third = "");

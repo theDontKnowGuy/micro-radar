@@ -230,24 +230,24 @@ void setup()
   // out a different lease, but it needs an mDNS resolver at the other end, which
   // not every phone or network has. The IP is the fallback that always works.
   //
-  // Scheme and address stay on one line: a URL split across two reads as two
-  // things to type. The fallback line carries the bare IP rather than a second
-  // http:// -- ShowStatusScreen sizes the type to the longest line, and the
-  // scheme twice would cost a step of size for something already said above.
+  // Scheme and address stay on one line each: a URL split across two reads as
+  // two things to type. Both lines carry the scheme, including the fallback --
+  // it costs a step of type size, and what it buys is that everything on this
+  // screen is something that can be pasted into a browser as it stands.
   //
-  // The QR code for the project page rides along on the top of this screen
-  // rather than taking one of its own. It is the same seven seconds either way,
-  // and this is the one screen whose audience is already holding a phone.
-  ShowStatusScreenWithQr(tft,
-                         "Configure me at:",
-                         mdnsUrl,
-                         "or " + WiFi.localIP().toString(),
-                         "",
-                         "v" FIRMWARE_VERSION);
+  // The name is what the QR code above them carries, because it is the address
+  // that is still right after the next reboot. What the code cannot help with
+  // is a phone that will not resolve a .local name, which is exactly what the
+  // second line is for.
+  ShowQrAddressScreen(tft,
+                      "Configure at:",
+                      mdnsUrl,
+                      "or " + configurationUrl,
+                      "v" FIRMWARE_VERSION);
 
   // Keep the address visible long enough to read while the asynchronous
   // configuration server is already available.
-  delay(7000);
+  delay(10000);
 
   // initialise aircraft manager
   aircraftManager.Initialise();
