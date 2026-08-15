@@ -7,7 +7,9 @@ This is a fork of [Anthony Sturdy's Micro Radar](https://github.com/AnthonySturd
 adapted from the original combined ESP32-C3/display module to an ESP32-S3 with a
 separate display.
 
-![Dense radar scene with collision-aware aircraft labels](docs/images/dense-radar-scene.webp)
+![2 Radars](docs/images/2radars.png)
+
+![Radar](docs/images/radar.png)
 
 ## Features
 
