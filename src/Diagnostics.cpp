@@ -14,6 +14,7 @@
 #include <cstring>
 
 #include <Preferences.h>
+#include <WiFi.h>
 #include <esp_log.h>
 #include <esp_system.h>
 #include <sdkconfig.h>
@@ -72,12 +73,92 @@ std::atomic<unsigned long> transportWindowStartedAt{0};
 // Raised by the log hook, lowered by Poll() when it shuts the agent down.
 std::atomic<bool> transportFlooded{false};
 
+// Armed by Begin() (or by a restart below) and consumed by the next Poll().
+//
+// A tidiness measure, and worth being honest about how little it buys: the
+// thing that fixed the ten-second unsupervised storm is the Poll() pump around
+// the address screen in setup(), not this. esp_insights_init() looks at
+// esp_wifi_sta_get_ap_info() and queues a report of its own when it finds the
+// station already associated, so the transport can start failing inside
+// StartAgent() whatever this flag does. What deferring the explicit send is
+// good for is narrower: it keeps the one upload this module controls from
+// going out before the loop that watches for the consequences is running.
+std::atomic<bool> firstSendPending{false};
+
+// The diagnostics store is freed by StopAgent() and allocated by StartAgent(),
+// and Event() writes into it from whichever task called it -- AircraftManager
+// does so from "radar-network" on core 0 while Poll() runs on the loop task.
+// Without this, the interleaving is: the network task passes the `started`
+// check, the loop task frees the store inside esp_insights_disable(), the
+// network task writes through the pointer that has just been NULLed. That is
+// the same StoreProhibited this file already documents for rmaker_queue_ta.
+//
+// The race is not new, but the exposure is: teardown used to happen at most
+// once per boot, and the one place it happened with other tasks running had
+// already suspended them. The restart below makes it a recurring event on a
+// live device, which turns a narrow window into one that will eventually be
+// hit.
+//
+// It does not close the window completely, and nothing in this file can. Warn()
+// and Error() reach the store through the IDF's own esp_log_write, which the
+// Insights build wraps at link time -- that path is inside the library and
+// takes no lock of ours. What is covered is Event(), which is the call that
+// carries the strings worth having and the one this firmware makes most.
+//
+// The cost is that an Event() landing during a teardown waits for it, and a
+// teardown is two to four seconds (see Poll() in the header). That falls on the
+// network task, whose fetches already take seconds and which has nothing
+// waiting on it in the meantime -- and the alternative to waiting is the
+// use-after-free this exists to prevent.
+SemaphoreHandle_t storeMutex = nullptr;
+
+// Restart bookkeeping, touched only from Poll() and Begin() -- both on the
+// Arduino loop task -- so plain variables are enough.
+//
+// The stop used to be final until someone power-cycled the radar. That was
+// tolerable while it took a sustained storm to trigger; now that the detector
+// actually fires, the common case it fires on is a router that has not got its
+// upstream back yet at the moment the radar boots, and answering a thirty
+// second outage by disabling reporting until the next reboot is not a good
+// trade for a device on someone else's shelf.
+//
+// So the agent comes back, on a doubling delay: five minutes, ten, twenty, up
+// to an hour. If the internet is genuinely gone, the cost settles at one short
+// burst an hour rather than a permanent one; if it was a blip, reporting
+// resumes on its own.
+bool restartScheduled = false;
+unsigned long agentStoppedAt = 0;
+unsigned long agentStartedAt = 0;
+constexpr unsigned long FirstRestartDelayMs = 5UL * 60UL * 1000UL;
+constexpr unsigned long MaxRestartDelayMs = 60UL * 60UL * 1000UL;
+unsigned long restartDelayMs = FirstRestartDelayMs;
+
+// How long the agent has to run without storming before the doubling above is
+// forgiven. Without it the delay only ever grows, so a unit that meets four
+// unrelated blips over a couple of months is on the one-hour delay for the rest
+// of its life -- which is the permanent shutdown this restart was written to
+// avoid, arrived at slowly instead of at once.
+//
+// Half an hour is several of the agent's own 60-240 second reporting cycles, so
+// a run that reaches it has demonstrably been uploading rather than merely
+// sitting there between failures.
+constexpr unsigned long StableRunMs = 30UL * 60UL * 1000UL;
+
 // A burst is this many transport errors inside this window. Chosen against an
 // observed failure: a rejected key produced errors roughly five times a second,
 // so twenty in a minute is far above anything intermittent and is reached in
 // seconds by a genuine storm.
 constexpr uint32_t TransportErrorBurst = 20;
 constexpr unsigned long TransportErrorWindowMs = 60000;
+
+// Puts the burst count back to nothing, so that a restarted agent is judged on
+// what it does next rather than on the errors that stopped the last one.
+void ResetTransportWindow()
+{
+    transportErrors.store(0);
+    transportWindowStartedAt.store(0);
+    transportFlooded.store(false);
+}
 
 // Where the IDF's logs go once Begin() has run.
 //
@@ -202,11 +283,88 @@ uint32_t RecordBoot()
 // queue. By the time Insights.end() runs there is no task left to trip over the
 // teardown, and the esp_rmaker_work_queue_deinit() inside it finds the queue
 // already gone and returns.
+//
+// Held across the whole teardown rather than around Insights.end() alone: the
+// point of the lock is that no other task is inside esp_diag_log_event() while
+// the store it writes to is being freed, and `started` has to be lowered under
+// the same lock or a waiter would acquire it and walk straight into the check
+// it already passed. See storeMutex.
 void StopAgent()
 {
+    if (storeMutex != nullptr)
+        xSemaphoreTake(storeMutex, portMAX_DELAY);
+
     esp_rmaker_work_queue_deinit();
     Insights.end();
     started = false;
+    firstSendPending.store(false);
+
+    if (storeMutex != nullptr)
+        xSemaphoreGive(storeMutex);
+}
+
+// Declares one of this firmware's dashboard variables, and says so when it
+// cannot.
+//
+// The return value is worth a line because the failure is silent and the
+// restart path is what could produce it. The table holds
+// CONFIG_DIAG_VARIABLES_MAX_COUNT entries -- 20, shared with the ones the
+// network stack registers for itself -- and it is freed and rebuilt on every
+// restart. esp_insights_disable() does call esp_diag_variables_deinit(), so a
+// cycle that leaked entries would be a library bug rather than one of ours; the
+// point of noticing is that if it ever happens, the symptom on the dashboard is
+// a device that quietly goes back to being an unlabelled MAC address, which
+// looks like a different fault entirely.
+void RegisterVariable(const char* key, const char* label)
+{
+    if (!Insights.variables.addString("radar", key, label, "device"))
+        Serial.printf("Diagnostics: could not register the '%s' variable\n", key);
+}
+
+// Brings the agent up, and is called for the first start and for every restart
+// after a storm. Everything here has to be redone on a restart rather than only
+// on the first start: Insights.end() frees the variable table along with the
+// rest of the diagnostics store, so a resumed agent that did not re-declare
+// these would report as an unlabelled node on an unknown firmware version.
+//
+// Deliberately does not send. The caller arms firstSendPending instead, so the
+// upload happens on the next Poll() with the burst detector already watching.
+bool StartAgent()
+{
+    // Large buffers into PSRAM. The 360x360 backbuffer already showed that this
+    // board's contiguous SRAM is the scarce thing, and the agent's buffers have
+    // no reason to compete for it.
+    const bool useExternalRam = ESP.getPsramSize() > 0;
+
+    // Node id left null so the agent uses the Wi-Fi MAC, which is unique
+    // without anyone having to keep a list. The human label is attached below
+    // as a variable instead -- two friends both typing "living room" would
+    // otherwise merge into one device on the dashboard.
+    if (!Insights.begin(storedAuthKey.c_str(), nullptr, 0xFFFFFFFF, useExternalRam))
+        return false;
+
+    started = true;
+    agentStartedAt = millis();
+    nodeId = Insights.nodeID();
+
+    // Shown beside each device on the dashboard. Without it, twenty radars are
+    // twenty MAC addresses and no way to tell whose is crashing.
+    if (!storedLabel.isEmpty()) {
+        RegisterVariable("label", "Label");
+        Insights.variables.setString("label", storedLabel.c_str());
+    }
+
+    // So a crash can be read against the build it came from. The dashboard
+    // groups by version, which is what turns "it crashes sometimes" into "it
+    // started crashing in 1.7.0".
+    RegisterVariable("fw", "Firmware");
+    Insights.variables.setString("fw", FIRMWARE_VERSION);
+
+    // A restarted agent starts its burst count from nothing. Without this the
+    // errors that stopped it are still in the window, and the first failure
+    // after the restart would trip the detector again immediately.
+    ResetTransportWindow();
+    return true;
 }
 #endif
 
@@ -250,41 +408,31 @@ void Begin(ConfigurationWebServer& config)
         return;
     }
 
-    // Large buffers into PSRAM. The 360x360 backbuffer already showed that this
-    // board's contiguous SRAM is the scarce thing, and the agent's buffers have
-    // no reason to compete for it.
-    const bool useExternalRam = ESP.getPsramSize() > 0;
+    // Before anything can write to the store, which is what makes it safe for
+    // Event() to test the handle without a lock of its own: this runs in
+    // setup(), ahead of AircraftManager::Initialise() and so ahead of the only
+    // other task that calls Event(). A failure here is not fatal -- both users
+    // fall back to running unlocked, which is the behaviour this had before --
+    // but it is worth saying out loud rather than leaving as a silent
+    // difference in how the device behaves under teardown.
+    storeMutex = xSemaphoreCreateMutex();
+    if (storeMutex == nullptr)
+        Serial.println("Diagnostics: no mutex for the event store - teardown is unguarded");
 
-    // Node id left null so the agent uses the Wi-Fi MAC, which is unique
-    // without anyone having to keep a list. The human label is attached below
-    // as a variable instead -- two friends both typing "living room" would
-    // otherwise merge into one device on the dashboard.
-    if (!Insights.begin(storedAuthKey.c_str(), nullptr, 0xFFFFFFFF, useExternalRam)) {
+    // Read before the agent starts because StartAgent() declares it as a
+    // variable, and is kept in a String that outlives this call for the reason
+    // at the top of this file.
+    storedLabel = config.GetStoredString("insights-label");
+    storedLabel.trim();
+
+    if (!StartAgent()) {
         // Deliberately not an Error(): the reporting channel is what just
         // failed, so sending this through it would go nowhere.
         Serial.println("Diagnostics: agent failed to start - check the auth key");
         return;
     }
 
-    started = true;
-    nodeId = Insights.nodeID();
-
     Serial.printf("Diagnostics: reporting as %s\n", nodeId.c_str());
-
-    // Shown beside each device on the dashboard. Without it, twenty radars are
-    // twenty MAC addresses and no way to tell whose is crashing.
-    storedLabel = config.GetStoredString("insights-label");
-    storedLabel.trim();
-    if (!storedLabel.isEmpty()) {
-        Insights.variables.addString("radar", "label", "Label", "device");
-        Insights.variables.setString("label", storedLabel.c_str());
-    }
-
-    // So a crash can be read against the build it came from. The dashboard
-    // groups by version, which is what turns "it crashes sometimes" into "it
-    // started crashing in 1.7.0".
-    Insights.variables.addString("radar", "fw", "Firmware", "device");
-    Insights.variables.setString("fw", FIRMWARE_VERSION);
 
     // The first thing every boot reports, and the one that makes a crash loop
     // legible: a device whose events are a column of "panic" is telling a very
@@ -292,17 +440,13 @@ void Begin(ConfigurationWebServer& config)
     Event("boot", "#%u v%s, reset: %s",
           RecordBoot(), FIRMWARE_VERSION, ResetReasonName(resetReason));
 
-    // Pushed now rather than left to the agent's own schedule, which is 60 to
-    // 240 seconds away. Waiting four minutes to find out whether a key works is
-    // the difference between a setting you can check and one you have to
-    // believe in.
-    //
-    // The return value only says the send was queued -- esp_insights_send_data()
-    // hands the work to the rmaker queue task and comes straight back, so the
-    // HTTP result is not knowable here. It arrives on the console a moment
-    // later as either silence or a tport_https line, which is why this is worth
-    // doing at all: it moves that answer to within a second or two of boot.
-    Insights.send();
+    // Armed rather than sent, and Poll() does it -- see firstSendPending. It
+    // still goes out within milliseconds of the first pass of whichever loop
+    // follows setup(), which keeps what this was for: the agent's own schedule
+    // is 60 to 240 seconds away, and waiting four minutes to find out whether a
+    // key works is the difference between a setting you can check and one you
+    // have to believe in.
+    firstSendPending.store(true);
 #else
     (void)config;
     Serial.println("Diagnostics: ESP Insights is not compiled into this core");
@@ -317,18 +461,91 @@ bool Enabled()
 void Poll()
 {
 #ifdef CONFIG_ESP_INSIGHTS_ENABLED
-    if (!started || !transportFlooded.load())
+    if (started) {
+        // Before the flood check rather than after it, so that a send which
+        // turns into a storm is stopped by the very next pass rather than
+        // sitting unqueued behind one.
+        //
+        // exchange() so this happens once even if two callers race -- the
+        // OpenSky hold loop and loop() are different loops, not concurrent
+        // ones, but the flag is also written from Begin() and a plain
+        // load-then-store would be the kind of thing that only misbehaves in
+        // the field.
+        if (firstSendPending.exchange(false))
+            Insights.send();
+
+        if (!transportFlooded.load()) {
+            // A run this long has been through several of the agent's own
+            // 60-240 second reporting cycles without complaint, so whatever
+            // stopped it last time is over and the escalated delay it earned
+            // should not be charged against the next unrelated blip. See
+            // StableRunMs.
+            if (restartDelayMs != FirstRestartDelayMs &&
+                millis() - agentStartedAt > StableRunMs)
+                restartDelayMs = FirstRestartDelayMs;
+
+            return;
+        }
+
+        transportFlooded.store(false);
+
+        // Straight to Serial. Error() would route this through the log hook that
+        // just tripped, and a shutdown notice is not worth another lap through the
+        // machinery that is being shut down.
+        Serial.println("Diagnostics: transport failing repeatedly - stopping the agent");
+        Serial.printf("Diagnostics: retrying in %lu minutes - if this repeats, check the auth key"
+                      " on the configuration page\n",
+                      restartDelayMs / 60000UL);
+
+        StopAgent();
+
+        restartScheduled = true;
+        agentStoppedAt = millis();
+        return;
+    }
+
+    // Not running. Either it never started -- no key, or a key the agent
+    // refused, neither of which a retry would change -- or a storm stopped it
+    // and it is waiting out the delay.
+    if (!restartScheduled)
         return;
 
-    transportFlooded.store(false);
+    if (millis() - agentStoppedAt < restartDelayMs)
+        return;
 
-    // Straight to Serial. Error() would route this through the log hook that
-    // just tripped, and a shutdown notice is not worth another lap through the
-    // machinery that is being shut down.
-    Serial.println("Diagnostics: transport failing repeatedly - stopping the agent");
-    Serial.println("Diagnostics: check the auth key on the configuration page, then restart");
+    // Ahead of the backoff below, and that order is the whole point: a radar
+    // with no network has not tried anything, so it has nothing to back off
+    // from. Charging it anyway walked the delay from five minutes to the hour
+    // cap in about two hours of downtime, and left reporting dark for up to
+    // another hour after the router came back -- an outage extending its own
+    // recovery, which is the opposite of what a backoff is for.
+    //
+    // The storm case -- associated, but nothing reachable behind the router --
+    // looks connected here, which is why the retry exists rather than this
+    // check standing in for it. Cheap enough to run per pass: WiFi.status() is
+    // a read of an event group bit.
+    if (WiFi.status() != WL_CONNECTED)
+        return;
 
-    StopAgent();
+    // Charged now that a restart is genuinely being attempted. Doubled here
+    // rather than at the stop so the delay charged is the one that was
+    // announced.
+    const unsigned long nextDelay = restartDelayMs * 2;
+    restartDelayMs = nextDelay > MaxRestartDelayMs ? MaxRestartDelayMs : nextDelay;
+    agentStoppedAt = millis();
+
+    Serial.println("Diagnostics: restarting the reporting agent");
+
+    if (!StartAgent()) {
+        Serial.println("Diagnostics: agent would not restart - waiting again");
+        return;
+    }
+
+    // Distinct from "boot" on purpose: this is the event that says a gap in a
+    // device's history was an outage rather than a device that was switched
+    // off, which is the question anyone reading a sparse timeline asks first.
+    Event("insights", "reporting resumed after transport failures");
+    firstSendPending.store(true);
 #endif
 }
 
@@ -356,6 +573,15 @@ void PauseForUpdate()
     Event("update", "installing, going quiet");
     Insights.send();
     StopAgent();
+
+    // Cancelled belt-and-braces rather than because anything can currently act
+    // on it: every caller follows this with UpdateScreen::RunFirmwareUpdate(),
+    // which blocks until it reboots on both the success and the failure path
+    // and never calls Poll(). So there is no pass of any loop between here and
+    // the reset in which a restart could fire. The line costs nothing and means
+    // a future caller that does return here cannot bring the agent back up on
+    // top of a flash write.
+    restartScheduled = false;
 #endif
 }
 
@@ -371,8 +597,19 @@ void Event(const char* tag, const char* format, ...)
     Serial.printf("[%s] %s\n", tag, message);
 
 #ifdef CONFIG_ESP_INSIGHTS_ENABLED
-    if (!started)
+    // Under the lock, and the `started` test has to be inside it rather than in
+    // front of it. AircraftManager calls this from the "radar-network" task
+    // while Poll() can be tearing the agent down on the loop task, and a check
+    // made outside the lock is a check that was true a moment before the store
+    // it approved was freed. See storeMutex.
+    if (storeMutex != nullptr)
+        xSemaphoreTake(storeMutex, portMAX_DELAY);
+
+    if (!started) {
+        if (storeMutex != nullptr)
+            xSemaphoreGive(storeMutex);
         return;
+    }
 
     // "%s" rather than passing the caller's format through: the text has
     // already been expanded, and handing an arbitrary string to a printf-style
@@ -388,6 +625,10 @@ void Event(const char* tag, const char* format, ...)
     // quietly records nothing. Without this line that state is indistinguishable
     // from working.
     const esp_err_t stored = esp_diag_log_event(tag, "%s", message);
+
+    if (storeMutex != nullptr)
+        xSemaphoreGive(storeMutex);
+
     if (stored != ESP_OK)
         Serial.printf("Diagnostics: event dropped (0x%x) - buffer full? power-cycle to clear\n",
                       stored);

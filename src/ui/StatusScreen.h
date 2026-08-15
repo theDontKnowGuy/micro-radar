@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Arduino.h>
+#include <LovyanGFX.hpp>
 
 #include "LGFX.h"
 
@@ -16,8 +17,18 @@ void ShowStatusScreen(LGFX& tft,
                       const String& fourth = "",
                       const String& fifth = "");
 
-// The address screen: a heading, the radar's address as a QR code under it, and
-// the same address in text under that.
+// Where a QR badge's pixels come from. ConfigQr and WifiSetupQr each expose a
+// pair of functions with this shape -- one for the radar's configuration
+// address, one for its setup access point -- and this is the only thing about
+// either that ShowQrAddressScreen needs to know, so it takes a pair of function
+// pointers rather than depending on both.
+struct QrBadgeSource {
+  int (*sizeWithin)(int maxSize);
+  void (*draw)(LovyanGFX& canvas, int x, int y, int size);
+};
+
+// The address screen: a heading, an address as a QR code under it, and the same
+// address in text under that.
 //
 // The order is what the screen is for. The heading says what the thing below it
 // is, the code is the way anyone with a phone in their hand should take, and the
@@ -36,5 +47,6 @@ void ShowStatusScreen(LGFX& tft,
 void ShowQrAddressScreen(LGFX& tft,
                          const String& heading,
                          const String& address,
+                         const QrBadgeSource& badge,
                          const String& fallback = "",
                          const String& footnote = "");

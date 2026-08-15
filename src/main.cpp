@@ -12,6 +12,7 @@
 #include "WiFiConnection.h"
 #include "ui/AlignmentScreen.h"
 #include "ui/BootScreen.h"
+#include "ui/ConfigQr.h"
 #include "ui/FrameTimer.h"
 #include "ui/PanelTrim.h"
 #include "ui/RadarSweep.h"
@@ -242,12 +243,27 @@ void setup()
   ShowQrAddressScreen(tft,
                       "Configure at:",
                       mdnsUrl,
+                      { ConfigQr::SizeWithin, ConfigQr::Draw },
                       "or " + configurationUrl,
                       "v" FIRMWARE_VERSION);
 
   // Keep the address visible long enough to read while the asynchronous
   // configuration server is already available.
-  delay(10000);
+  //
+  // Pumped rather than slept through. This is the diagnostics agent's first ten
+  // seconds of life and the only stretch of the boot where nothing calls
+  // Diagnostics::Poll() -- which is what noticed, in the field, a radar that had
+  // joined a router with no working internet behind it: the agent retried its
+  // upload about a hundred times a second for the whole delay, and the storm was
+  // still running when aircraftManager.Initialise() below asked the same heap for
+  // a TLS session of its own. Polling here lets the agent stand itself down
+  // within a fraction of a second instead, before it has anything to collide
+  // with.
+  const unsigned long addressShownAt = millis();
+  while (millis() - addressShownAt < 10000) {
+    Diagnostics::Poll();
+    delay(2);
+  }
 
   // initialise aircraft manager
   aircraftManager.Initialise();
@@ -258,13 +274,6 @@ void setup()
 
 void loop()
 {
-  // Ahead of everything, including the early returns below: a radar left in
-  // alignment mode still has a network stack to protect, and that path returns
-  // before it would reach anything further down. Reporting is the first thing
-  // to give way when it starts costing more than it is worth -- see
-  // Diagnostics::Poll().
-  Diagnostics::Poll();
-
   // Settings were saved over the web UI. Restart here rather than in the
   // request handler, so no SPI DMA transfer is in flight when the chip resets.
   if (configServer.RestartRequested()) {
@@ -286,6 +295,19 @@ void loop()
     UpdateScreen::RunFirmwareUpdate(tft, firmwareUpdater);
     return;
   }
+
+  // Below the update check and above the alignment return, and both halves of
+  // that matter.
+  //
+  // Below, because Poll() can restart a stood-down agent, and a restart on the
+  // pass that is about to call PauseForUpdate() would pay for an agent init and
+  // its multi-second teardown to accomplish nothing. Above, because a radar
+  // left in alignment mode still has a network stack to protect, and that path
+  // returns before it would reach anything further down.
+  //
+  // Reporting is the first thing to give way when it starts costing more than
+  // it is worth -- see Diagnostics::Poll().
+  Diagnostics::Poll();
 
   // Calibration. Below the restart and update checks above so the page can
   // still be saved and the radar still update itself out of this mode, and

@@ -2,7 +2,6 @@
 
 #include <cmath>
 
-#include "ui/ConfigQr.h"
 #include "ui/PanelTrim.h"
 #include "ui/SmoothText.h"
 
@@ -48,11 +47,14 @@ constexpr int LineGap = 6;
 
 // How much of the panel the QR badge may have.
 //
-// A hundred pixels, which for the current address comes out at three pixels a
-// module and a 99px plate. Two pixels a module is where a phone stops being
-// able to focus, and it is the only reason the budget is not smaller still --
-// what is left over is what the heading and the lines are read from.
-constexpr int BadgeBudget = 100;
+// Sized to the denser of the two codes this screen draws, not the shorter one:
+// the config address is 25 modules a side and would be happy with less, but the
+// WiFi join code -- WIFI:T:nopass;S:<ssid>;; is long enough to force version 3,
+// 29 modules -- needs 111px to clear three pixels a module. Anything under that
+// leaves it at two, which is where a phone stops being able to focus, and which
+// is exactly the plate a hundred-pixel budget used to hand it. What is left over
+// is what the heading and the lines are read from.
+constexpr int BadgeBudget = 111;
 
 // Air above and below the badge. Wider than the gap between two lines of text,
 // because the badge is not a line of text: the code needs to read as its own
@@ -83,6 +85,7 @@ struct Layout {
   String heading;
   String address;
   String lines[MaxLines];
+  QrBadgeSource badge = { nullptr, nullptr };
   int badgeSize = 0;
 };
 
@@ -268,10 +271,10 @@ void DrawLayout(LGFX& tft, const Layout& layout)
   // a grid, and softening the edge of every module is the one thing that helps
   // a letterform and hurts a badge.
   if (layout.badgeSize > 0)
-    ConfigQr::Draw(canvas,
-                   (SCREEN_SIZE - layout.badgeSize) / 2,
-                   placement.badgeTop,
-                   layout.badgeSize);
+    layout.badge.draw(canvas,
+                      (SCREEN_SIZE - layout.badgeSize) / 2,
+                      placement.badgeTop,
+                      layout.badgeSize);
 
   int y = placement.firstLineTop;
   for (const String& line : layout.lines) {
@@ -319,6 +322,7 @@ void ShowStatusScreen(LGFX& tft,
 void ShowQrAddressScreen(LGFX& tft,
                          const String& heading,
                          const String& address,
+                         const QrBadgeSource& badge,
                          const String& fallback,
                          const String& footnote)
 {
@@ -327,10 +331,11 @@ void ShowQrAddressScreen(LGFX& tft,
   layout.address = address;
   layout.lines[0] = fallback;
   layout.lines[1] = footnote;
+  layout.badge = badge;
 
   // Asked for before anything is laid out, because the badge is part of the
   // block the type has to fit around -- and it is only ever as big as a whole
   // number of pixels per module allows.
-  layout.badgeSize = ConfigQr::SizeWithin(BadgeBudget);
+  layout.badgeSize = badge.sizeWithin(BadgeBudget);
   DrawLayout(tft, layout);
 }

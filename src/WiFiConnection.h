@@ -10,6 +10,13 @@ class FirmwareUpdater;
 // the two halves of the join, so setup() does not have to carry them.
 namespace WiFiConnection {
 
+// The access point the radar puts up when it has no network to join. The
+// configuration page is served over it, so setup and configuration are the
+// same page rather than two. Public rather than local to WiFiConnection.cpp so
+// WifiSetupQr can check its generated code against it -- see the static_assert
+// in src/ui/WifiSetupQr.cpp.
+constexpr const char* SetupHotspotName = "MicroRadar-Setup";
+
 // The whole budget for getting onto a network at boot, counted from the instant
 // the boot logo goes up -- the join runs underneath the logo, so this is spent
 // looking at the boot screen rather than added on after it. Long enough for a

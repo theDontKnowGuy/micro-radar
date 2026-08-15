@@ -7,6 +7,7 @@
 #include "ConfigurationWebServer.h"
 #include "FirmwareUpdater.h"
 #include "ui/StatusScreen.h"
+#include "ui/WifiSetupQr.h"
 
 // Optional hard-coded Wi-Fi credentials. Leave both blank to skip pre-baking them and use the setup hotspot instead.
 const char* preconfiguredWifiSsid = "";
@@ -14,11 +15,6 @@ const char* preconfiguredWifiPassword = "";
 
 namespace WiFiConnection {
 namespace {
-
-// The access point the radar puts up when it has no network to join. The
-// configuration page is served over it, so setup and configuration are the same
-// page rather than two.
-constexpr const char* SetupHotspotName = "MicroRadar-Setup";
 
 // Found by BeginJoin and waited on by everything after it, which is why they
 // outlive the call that reads them.
@@ -140,15 +136,23 @@ void RunSetupPortal(LGFX& tft, ConfigurationWebServer& configServer, FirmwareUpd
   WiFi.softAP(SetupHotspotName);
   configServer.Initialise(updater, ConfigurationWebServer::Mode::Setup);
 
-  // Kept to short lines on purpose: ShowStatusScreen sizes the type to the
-  // longest one, and this is the screen someone reads with the radar at arm's
-  // length while they hunt for the hotspot on their phone.
-  ShowStatusScreen(tft,
-                   "- SETUP -",
-                   "Connect to WiFi:",
-                   SetupHotspotName,
-                   "then open",
-                   WiFi.softAPIP().toString());
+  // The code is the way anyone with a phone in their hand should join --
+  // scanning it does what typing the SSID in by hand does, minus the chance of
+  // a typo. The name stays on screen under it regardless, both as the fallback
+  // for a phone whose camera app will not offer to join a network from a code
+  // and as confirmation, while the code is in frame, that it is not going to
+  // ask for a password once tapped: the network really is open.
+  //
+  // The heading carries the instruction rather than the old "- SETUP -" label:
+  // ShowQrAddressScreen has one heading line, not two, and someone who has never
+  // seen this radar before needs to be told to connect more than they need to
+  // be told they are in a mode called setup.
+  ShowQrAddressScreen(tft,
+                      "Connect to WiFi:",
+                      SetupHotspotName,
+                      { WifiSetupQr::SizeWithin, WifiSetupQr::Draw },
+                      "then open",
+                      WiFi.softAPIP().toString());
 
   // Blocking on purpose. Nothing else can usefully run without a network, and
   // loop() is never reached in this mode -- the only way out is the reboot

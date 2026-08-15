@@ -58,17 +58,44 @@ void Begin(ConfigurationWebServer& config);
 // set. Empty when reporting is off.
 [[nodiscard]] String NodeId();
 
-// Call once per pass of the render loop. Cheap -- an atomic load in the common
-// case -- and shuts the agent down if its transport has started failing in
-// bursts.
+// Call once per pass of the render loop, and from any loop in setup() that runs
+// for long enough to matter. Cheap -- two atomic loads in the common case.
 //
-// That is not a tidiness measure. Every retry the transport makes is a fresh
-// TLS handshake, and a rejected key makes them several times a second; this
-// board does not have the contiguous heap for that alongside the aircraft fetch
-// and the firmware updater, and what it looks like when it runs out is
-// mbedtls_ssl_setup failing with -0x7F00 in whichever component asked second.
-// Reporting is the least important thing on the radar, so it is the thing that
-// gives way. It stays off until the next restart.
+// It does three things, all of which have to happen somewhere that is running
+// often rather than on the agent's own task:
+//
+//   * sends the first report, which Begin() arms rather than performs;
+//   * shuts the agent down if its transport has started failing in bursts;
+//   * brings it back, on a doubling delay, once one has.
+//
+// The shutdown is not a tidiness measure. Every retry the transport makes is a
+// fresh TLS handshake, and a router with no working internet behind it makes
+// them about a hundred times a second; this board does not have the contiguous
+// heap for that alongside the aircraft fetch and the firmware updater, and what
+// it looks like when it runs out is mbedtls_ssl_setup failing with -0x7F00 in
+// whichever component asked second. Reporting is the least important thing on
+// the radar, so it is the thing that gives way.
+//
+// Which is why the call sites matter more than they look. Anything in setup()
+// that waits for ten seconds without calling this gives the agent ten seconds
+// of unsupervised storm, and the boot is exactly when both the aircraft task
+// and the update checker want a TLS session of their own.
+//
+// NOT always cheap, and the exception is worth knowing about before adding a
+// call site. A pass that stops the agent blocks its caller for roughly two
+// seconds and up to four: esp_rmaker_work_queue_deinit() waits on the worker in
+// vTaskDelay(2000) steps at CONFIG_FREERTOS_HZ=1000, against a worker whose own
+// receive timeout is the same two seconds. On the render loop that is a frozen
+// sweep for the duration.
+//
+// It buys a bounded cost in place of an unbounded one -- the alternative is the
+// storm running until something else fails -- but the arithmetic changed when
+// the restart went in. It used to be paid once per boot; a device whose key is
+// genuinely rejected now pays it at t+5, +15, +35 and +75 minutes and then
+// hourly, each time preceded by a short deliberate burst of failed handshakes
+// in whatever heap AircraftManager is using. The burst is about a fifth of a
+// second at the rate these arrive, so the trade holds, but a caller adding a
+// third loop that pumps this should know it is not free.
 void Poll();
 
 // Stops the agent before a firmware install. The download wants the only TLS
