@@ -346,11 +346,19 @@ void loop()
   const uint32_t drawStartedUs = micros();
   backbuffer.fillScreen(lgfx::color888(0, 0, 0));
 
-  const float sweepUpdateAngle = RadarSweep::Draw(backbuffer, sweepSettings, now);
+  const RadarSweep::SweepState sweep = RadarSweep::Compute(sweepSettings, now);
+
+  // Background elements the beam is meant to sweep over -- range rings, the
+  // clock -- go down first. The beam itself is drawn next, on top of them.
+  // Aircraft and the rim labels go on top of that again, same as before: they
+  // are the radar's targets and its furniture, not part of the display the
+  // beam is illuminating.
+  aircraftManager.DrawBackground(backbuffer, sweep.updateAngle, sweepSettings.enabled);
+  RadarSweep::DrawFan(backbuffer, sweepSettings, sweep);
 
   aircraftManager.Draw(
     backbuffer,
-    sweepUpdateAngle,
+    sweep.updateAngle,
     sweepSettings.enabled,
     sweepSettings.periodMs
   );

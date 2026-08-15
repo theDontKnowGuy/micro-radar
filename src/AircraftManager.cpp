@@ -59,48 +59,44 @@ constexpr int UPDATE_LABEL_X = (SCREEN_SIZE - UPDATE_LABEL_WIDTH) / 2;
 constexpr int UPDATE_LABEL_Y = LOCATION_LABEL_Y - UPDATE_LABEL_HEIGHT - 3;
 
 // The clock. Drawn in LovyanGFX's seven-segment face, which is 48 rows tall
-// with 32-wide digits and a 12-wide colon -- 140 for "00:00" -- scaled up from
-// there. The scale is applied in 16.16 fixed point by the font renderer, so a
-// fractional one is exact rather than rounded to whole pixels.
+// with 32-wide digits and a 12-wide colon -- 216 for "00:00:00" -- scaled up
+// from there. The scale is applied in 16.16 fixed point by the font renderer,
+// so a fractional one is exact rather than rounded to whole pixels.
 constexpr unsigned long TIMEZONE_FETCH_INTERVAL_MS = 6UL * 60UL * 60UL * 1000UL;
 constexpr unsigned long TIMEZONE_RETRY_INTERVAL_MS = 60UL * 1000UL;
-// Change the scale and nothing else: the two below follow from it, and the
+// Change the scale and nothing else: everything below follows from it, and the
 // static_asserts further down re-check the placement against the round face at
 // whatever size that leaves. Rounded up rather than truncated, so the reserved
-// region is never a pixel narrower than what is actually drawn in it.
+// region is never a pixel narrower than what is actually drawn in it. Smaller
+// than the two-field clock this replaced -- fitting a third field on the round
+// face cost it some size.
 constexpr int CLOCK_FONT_HEIGHT = 48;   // Font7, unscaled
-constexpr int CLOCK_FONT_WIDTH = 140;   // "00:00" in Font7, unscaled
-constexpr float CLOCK_TEXT_SCALE = 1.3f;
+constexpr int CLOCK_FONT_WIDTH = 216;   // "00:00:00" in Font7, unscaled
+constexpr float CLOCK_TEXT_SCALE = 1.2f;
 constexpr int CLOCK_DIGIT_HEIGHT = static_cast<int>(CLOCK_FONT_HEIGHT * CLOCK_TEXT_SCALE) + 1;
 constexpr int CLOCK_DIGITS_WIDTH = static_cast<int>(CLOCK_FONT_WIDTH * CLOCK_TEXT_SCALE) + 1;
 
-// The 12-hour format hangs AM/PM off the top right of the digits rather than
-// setting it on their baseline. On a round panel the rows under the digits are
-// the narrowest part of the face, and at this size the suffix does not fit
-// beside them there -- level with their top row it has width to spare.
-constexpr int CLOCK_SUFFIX_TEXT_SIZE = 3;
-constexpr int CLOCK_SUFFIX_GAP = 6;
-constexpr int CLOCK_SUFFIX_WIDTH = 2 * 6 * CLOCK_SUFFIX_TEXT_SIZE; // "AM" in the default font
-constexpr int CLOCK_SUFFIX_HEIGHT = 8 * CLOCK_SUFFIX_TEXT_SIZE;
+// The three figures' centres in Font7's unscaled glyph grid -- two digits each,
+// either side of a colon -- used to work out which one the sweep beam is over.
+// Hours and minutes read the same unscaled either way; hard-coded here rather
+// than derived from CLOCK_FONT_WIDTH because they are a property of the glyph
+// layout, not of the string's total width.
+constexpr int CLOCK_HOUR_CENTRE_UNSCALED = 32;
+constexpr int CLOCK_MINUTE_CENTRE_UNSCALED = 108;
+constexpr int CLOCK_SECOND_CENTRE_UNSCALED = 184;
 
 // The clock is drawn onto a cleared plate rather than over whatever is already
 // on the face -- the label solver only weighs its region, and aircraft markers
 // are not placed by the solver at all, so at any moment something can be under
 // the digits. The margin is what keeps the two apart: with only the drawn
 // extents cleared, a data block ending one pixel outside them still reads as
-// touching the time. Wider than the suffix gap on purpose, so the digit plate
-// and the suffix plate meet instead of leaving an uncleared sliver between.
+// touching the time.
 constexpr int CLOCK_CLEAR_PADDING = 4;
-static_assert(
-    2 * CLOCK_CLEAR_PADDING > CLOCK_SUFFIX_GAP,
-    "The digit and suffix plates no longer meet; widen the padding or close the gap"
-);
 
-// Reserved for the label solver as the union of the two: the digits are centred
-// on the face and the suffix overhangs to the right of them, so this does not
-// sit centred the way the smaller labels do.
+// The digits are centred on the face; nothing hangs off their side any more,
+// so the reserved label is exactly their own box.
 constexpr int CLOCK_LABEL_HEIGHT = CLOCK_DIGIT_HEIGHT;
-constexpr int CLOCK_LABEL_WIDTH = CLOCK_DIGITS_WIDTH + CLOCK_SUFFIX_GAP + CLOCK_SUFFIX_WIDTH;
+constexpr int CLOCK_LABEL_WIDTH = CLOCK_DIGITS_WIDTH;
 constexpr int CLOCK_LABEL_X = (SCREEN_SIZE - CLOCK_DIGITS_WIDTH) / 2;
 constexpr int CLOCK_LABEL_Y = UPDATE_LABEL_Y - CLOCK_LABEL_HEIGHT - 6;
 
@@ -113,9 +109,6 @@ constexpr int CLOCK_LABEL_Y = UPDATE_LABEL_Y - CLOCK_LABEL_HEIGHT - 6;
 constexpr int CLOCK_FACE_CENTRE = SCREEN_SIZE_DIV_2 - 1;
 constexpr int CLOCK_CORNER_DX = CLOCK_LABEL_X + CLOCK_DIGITS_WIDTH - CLOCK_FACE_CENTRE;
 constexpr int CLOCK_CORNER_DY = CLOCK_LABEL_Y + CLOCK_LABEL_HEIGHT - CLOCK_FACE_CENTRE;
-constexpr int CLOCK_SUFFIX_DX = CLOCK_LABEL_X + CLOCK_LABEL_WIDTH - CLOCK_FACE_CENTRE;
-constexpr int CLOCK_SUFFIX_DY =
-    CLOCK_LABEL_Y + CLOCK_SUFFIX_HEIGHT - CLOCK_FACE_CENTRE;
 
 static_assert(
     CLOCK_LABEL_Y + CLOCK_LABEL_HEIGHT < UPDATE_LABEL_Y,
@@ -126,11 +119,18 @@ static_assert(
         CLOCK_FACE_CENTRE * CLOCK_FACE_CENTRE,
     "The clock digits fall outside the round face; move them up or shrink them"
 );
-static_assert(
-    CLOCK_SUFFIX_DX * CLOCK_SUFFIX_DX + CLOCK_SUFFIX_DY * CLOCK_SUFFIX_DY <
-        CLOCK_FACE_CENTRE * CLOCK_FACE_CENTRE,
-    "The AM/PM suffix falls outside the round face; shrink it or close the gap"
-);
+
+// Each figure's centre on the backbuffer, in the same frame the corner check
+// above uses. Kept as the (dx, dy) offset from CLOCK_FACE_CENTRE rather than
+// the raw screen position: that is what atan2 wants, to turn a figure's
+// position into the bearing the sweep beam has to cross to update it.
+constexpr int CLOCK_HOUR_DX =
+    CLOCK_LABEL_X + static_cast<int>(CLOCK_HOUR_CENTRE_UNSCALED * CLOCK_TEXT_SCALE) - CLOCK_FACE_CENTRE;
+constexpr int CLOCK_MINUTE_DX =
+    CLOCK_LABEL_X + static_cast<int>(CLOCK_MINUTE_CENTRE_UNSCALED * CLOCK_TEXT_SCALE) - CLOCK_FACE_CENTRE;
+constexpr int CLOCK_SECOND_DX =
+    CLOCK_LABEL_X + static_cast<int>(CLOCK_SECOND_CENTRE_UNSCALED * CLOCK_TEXT_SCALE) - CLOCK_FACE_CENTRE;
+constexpr int CLOCK_FIGURE_DY = CLOCK_LABEL_Y + CLOCK_DIGIT_HEIGHT / 2 - CLOCK_FACE_CENTRE;
 
 // Why the face is empty, when it is empty because the radar cannot get the data
 // rather than because there is nothing flying. Two lines: what is wrong on top,
@@ -274,6 +274,18 @@ void ClearClockPlate(LGFX_Sprite& backbuffer, int x, int y, int width, int heigh
     );
 }
 
+// The angle from the face centre to one clock figure, normalised to the same
+// [0, TWO_PI) range the sweep angle itself is measured in -- see the aircraft
+// bearings ApplySweepUpdates works out the same way, just from a fixed offset
+// instead of a projected lat/lon.
+float ClockFigureBearing(int dx, int dy)
+{
+    float bearing = std::atan2(static_cast<float>(dy), static_cast<float>(dx));
+    if (bearing < 0.0f)
+        bearing += TWO_PI;
+    return bearing;
+}
+
 }  // namespace
 
 void AircraftManager::Initialise()
@@ -303,7 +315,6 @@ void AircraftManager::Initialise()
     const String renderWind = configServer.GetStoredString("wind");
     const String renderGroundTraffic = configServer.GetStoredString("ground-traffic");
     const String renderClock = configServer.GetStoredString("clock");
-    const String clockFormatSetting = configServer.GetStoredString("clock-format");
     const String markerStyle = configServer.GetStoredString("aircraft-marker");
     locationNameLabel = configServer.GetStoredString("location-name");
     locationNameLabel.trim();
@@ -317,9 +328,6 @@ void AircraftManager::Initialise()
     if (!renderWind.isEmpty()) displayWind = renderWind == "true";
     if (!renderGroundTraffic.isEmpty()) displayGroundTraffic = renderGroundTraffic == "true";
     if (!renderClock.isEmpty()) displayClock = renderClock == "true";
-    clockFormat = clockFormatSetting == "12h"
-        ? ClockFormat::TwelveHour
-        : ClockFormat::TwentyFourHour;
     if (markerStyle == "triangle")
         aircraftMarkerStyle = AircraftMarkerStyle::Triangle;
     else if (markerStyle == "dot")
@@ -1156,6 +1164,13 @@ void AircraftManager::ApplySweepUpdates(
     lastSweepFrameAt = now;
 }
 
+void AircraftManager::DrawBackground(LGFX_Sprite& backbuffer, float sweepAngle, bool sweepEnabled)
+{
+    DrawRadarCircles(backbuffer);
+    ApplyClockSweepUpdate(sweepAngle, sweepEnabled);
+    DrawClock(backbuffer);
+}
+
 void AircraftManager::Draw(
     LGFX_Sprite& backbuffer,
     float sweepAngle,
@@ -1164,7 +1179,6 @@ void AircraftManager::Draw(
 )
 {
     ApplySweepUpdates(sweepAngle, sweepEnabled, sweepPeriodMs);
-    DrawRadarCircles(backbuffer);
 
     backbuffer.setTextSize(1);
 
@@ -1291,7 +1305,6 @@ void AircraftManager::Draw(
     }
 
     DrawWindInfo(backbuffer);
-    DrawClock(backbuffer);
     DrawLocationInfo(backbuffer);
     DrawUpdateNotice(backbuffer);
     DrawFetchNotice(backbuffer);
@@ -2114,14 +2127,20 @@ void AircraftManager::DrawWindInfo(LGFX_Sprite& backbuffer) const
     backbuffer.setTextSize(1);
 }
 
-void AircraftManager::DrawClock(LGFX_Sprite& backbuffer) const
+void AircraftManager::ApplyClockSweepUpdate(float sweepAngle, bool sweepEnabled)
 {
-    if (!displayClock || !hasUtcOffset.load())
+    if (!displayClock || !hasUtcOffset.load()) {
+        hasPreviousClockSweepAngle = false;
+        hasLatchedClock = false;
         return;
+    }
 
     const time_t utcNow = time(nullptr);
-    if (utcNow < CLOCK_SYNCED_AFTER)
+    if (utcNow < CLOCK_SYNCED_AFTER) {
+        hasPreviousClockSweepAngle = false;
+        hasLatchedClock = false;
         return;
+    }
 
     // gmtime_r on a shifted timestamp rather than localtime_r on a real one:
     // the C library's idea of local time is whatever is in TZ, and TZ cannot
@@ -2131,44 +2150,78 @@ void AircraftManager::DrawClock(LGFX_Sprite& backbuffer) const
     struct tm parts = {};
     gmtime_r(&localNow, &parts);
 
-    char digits[8];
-    const char* suffix = nullptr;
-    if (clockFormat == ClockFormat::TwelveHour) {
-        int hour = parts.tm_hour % 12;
-        if (hour == 0)
-            hour = 12;
-        // No leading zero on a 12-hour clock -- the block is centred on what it
-        // actually measures, so a single-digit hour simply sits narrower.
-        snprintf(digits, sizeof(digits), "%d:%02d", hour, parts.tm_min);
-        suffix = parts.tm_hour < 12 ? "AM" : "PM";
-    } else {
-        snprintf(digits, sizeof(digits), "%02d:%02d", parts.tm_hour, parts.tm_min);
+    auto latchAll = [&]() {
+        latchedClockHour = parts.tm_hour;
+        latchedClockMinute = parts.tm_min;
+        latchedClockSecond = parts.tm_sec;
+        hasLatchedClock = true;
+    };
+
+    if (!sweepEnabled) {
+        // No beam to wait for a figure to be under: with the sweep off the
+        // clock just tracks live time, the way it did before the sweep began
+        // gating it.
+        latchAll();
+        hasPreviousClockSweepAngle = false;
+        return;
     }
 
-    // The digits are centred on the face on their own. The suffix hangs off
-    // their right rather than being counted into the centring: it is a modifier
-    // on the time, and a clock whose digits shift sideways twice a day to make
-    // room for it does not read as centred at all.
+    if (!hasPreviousClockSweepAngle) {
+        // First frame with a synced clock and a running sweep: paint every
+        // figure once so the face is not blank for however long the beam takes
+        // to reach all three, then let the beam take over from here.
+        latchAll();
+        previousClockSweepAngle = sweepAngle;
+        hasPreviousClockSweepAngle = true;
+        return;
+    }
+
+    float sweptAngle = sweepAngle - previousClockSweepAngle;
+    if (sweptAngle < 0.0f)
+        sweptAngle += TWO_PI;
+
+    // Each figure's bearing from the face centre. Worked out once: the
+    // geometry behind it is fixed at compile time, only the trig is not.
+    static const float HOUR_BEARING = ClockFigureBearing(CLOCK_HOUR_DX, CLOCK_FIGURE_DY);
+    static const float MINUTE_BEARING = ClockFigureBearing(CLOCK_MINUTE_DX, CLOCK_FIGURE_DY);
+    static const float SECOND_BEARING = ClockFigureBearing(CLOCK_SECOND_DX, CLOCK_FIGURE_DY);
+
+    auto sweptPast = [&](float bearing) {
+        float angleFromPrevious = bearing - previousClockSweepAngle;
+        if (angleFromPrevious < 0.0f)
+            angleFromPrevious += TWO_PI;
+        return angleFromPrevious > 0.0f && angleFromPrevious <= sweptAngle;
+    };
+
+    if (sweptPast(HOUR_BEARING))
+        latchedClockHour = parts.tm_hour;
+    if (sweptPast(MINUTE_BEARING))
+        latchedClockMinute = parts.tm_min;
+    if (sweptPast(SECOND_BEARING))
+        latchedClockSecond = parts.tm_sec;
+
+    previousClockSweepAngle = sweepAngle;
+}
+
+void AircraftManager::DrawClock(LGFX_Sprite& backbuffer) const
+{
+    if (!displayClock || !hasUtcOffset.load() || !hasLatchedClock)
+        return;
+
+    char digits[9];
+    snprintf(digits, sizeof(digits), "%02d:%02d:%02d",
+             latchedClockHour, latchedClockMinute, latchedClockSecond);
+
     backbuffer.setFont(&fonts::Font7);
     backbuffer.setTextSize(CLOCK_TEXT_SCALE);
-    const int digitsWidth = backbuffer.textWidth(digits);
-    const int x = (SCREEN_SIZE - digitsWidth) / 2;
 
-    // Cleared from the drawn extents rather than from the reserved box: at
-    // 12-hour a single-digit hour is narrower than the region the solver keeps
-    // clear, and the plate should be no larger than the time it is carrying.
-    // Same black the frame starts from, so the radar rings crossing here are
-    // cut as well -- the point is a clock that reads at a glance, and a ring
-    // running through the digits costs that as much as a callsign does.
-    ClearClockPlate(backbuffer, x, CLOCK_LABEL_Y, digitsWidth, CLOCK_DIGIT_HEIGHT);
-    if (suffix != nullptr)
-        ClearClockPlate(
-            backbuffer,
-            x + digitsWidth + CLOCK_SUFFIX_GAP,
-            CLOCK_LABEL_Y,
-            CLOCK_SUFFIX_WIDTH,
-            CLOCK_SUFFIX_HEIGHT
-        );
+    // The reserved box rather than the drawn extents: with the AM/PM suffix
+    // gone, "00:00:00" is the only shape this ever takes, so the two are the
+    // same size now. Same black the frame starts from, so the radar rings
+    // crossing here are cut as well -- the point is a clock that reads at a
+    // glance, and a ring running through the digits costs that as much as a
+    // callsign does.
+    ClearClockPlate(backbuffer, CLOCK_LABEL_X, CLOCK_LABEL_Y, CLOCK_DIGITS_WIDTH, CLOCK_DIGIT_HEIGHT);
 
     backbuffer.setTextColor(lgfx::color888(CLOCK_COLOR_R, CLOCK_COLOR_G, CLOCK_COLOR_B));
 
@@ -2179,7 +2232,7 @@ void AircraftManager::DrawClock(LGFX_Sprite& backbuffer) const
         backbuffer,
         PanelTrim::TextSlot::ClockDigits,
         digits,
-        x + digitsWidth / 2,
+        CLOCK_LABEL_X + CLOCK_DIGITS_WIDTH / 2,
         CLOCK_LABEL_Y + CLOCK_DIGIT_HEIGHT / 2
     );
 
@@ -2187,21 +2240,6 @@ void AircraftManager::DrawClock(LGFX_Sprite& backbuffer) const
     // scale, and both are global state on the sprite.
     backbuffer.setFont(&fonts::Font0);
     backbuffer.setTextSize(1);
-
-    // The seven-segment face has no letters, so AM/PM is drawn in the default
-    // font, level with the top of the digits -- see the note on the layout
-    // constants for why it is not on their baseline.
-    if (suffix != nullptr) {
-        backbuffer.setTextSize(CLOCK_SUFFIX_TEXT_SIZE);
-        PanelTrim::DrawTurnedText(
-            backbuffer,
-            PanelTrim::TextSlot::ClockSuffix,
-            suffix,
-            x + digitsWidth + CLOCK_SUFFIX_GAP + CLOCK_SUFFIX_WIDTH / 2,
-            CLOCK_LABEL_Y + CLOCK_SUFFIX_HEIGHT / 2
-        );
-        backbuffer.setTextSize(1);
-    }
 }
 
 void AircraftManager::DrawLocationInfo(LGFX_Sprite& backbuffer) const

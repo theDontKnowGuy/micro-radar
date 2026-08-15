@@ -87,7 +87,7 @@ struct PageValues {
     String scanlineEnabled, sweepPeriod, speedEnabled, speedUnit;
     String altitudeEnabled, altitudeUnit, destinationEnabled, windEnabled;
     String groundTrafficEnabled;
-    String clockEnabled, clockFormat;
+    String clockEnabled;
     String aircraftMarker, autoUpdate, screenTrim, alignmentTest;
     String insightsKeyPlaceholder, insightsLabel;
 
@@ -922,10 +922,6 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                                 <span>Show local time</span>
                                 <input id="clock" name="clock" type="checkbox" %CLOCK%>
                             </label>
-                            <select id="clock-format" name="clock-format" aria-label="Clock format">
-                                <option value="24h" %CLOCK_24H_SELECTED%>24-hour</option>
-                                <option value="12h" %CLOCK_12H_SELECTED%>AM/PM</option>
-                            </select>
                         </div>
                     </fieldset>
 
@@ -1552,7 +1548,6 @@ static const char CONFIG_HTML[] PROGMEM = R"(
             bindDependentSelect('scanline', 'sweep-period');
             bindDependentSelect('speed', 'speed-unit');
             bindDependentSelect('altitude', 'altitude-unit');
-            bindDependentSelect('clock', 'clock-format');
 
             // The radar stores its coverage as a half-width in degrees, because
             // that is what the projection divides by. Degrees are not a distance
@@ -2278,7 +2273,6 @@ void ConfigurationWebServer::EnsureDefaults() {
     // radar itself, and a radar that shows one without being asked reads as a
     // clock with aircraft on it.
     ensureKey("clock", "false");
-    ensureKey("clock-format", "24h");
 
     // Automatic by default: an unattended radar that quietly keeps itself
     // current is the behaviour most owners want, and the alternative leaves
@@ -2359,7 +2353,6 @@ void ConfigurationWebServer::Initialise(FirmwareUpdater& updater, Mode serveMode
         values.windEnabled = prefs.getString("wind", "false");
         values.groundTrafficEnabled = prefs.getString("ground-traffic", "false");
         values.clockEnabled = prefs.getString("clock", "false");
-        values.clockFormat = prefs.getString("clock-format", "24h");
         values.aircraftMarker = prefs.getString("aircraft-marker", "radar");
         values.autoUpdate = prefs.getString("auto-update", "true");
         values.screenTrim = EscapeHtmlAttribute(prefs.getString("screen-trim", "0"));
@@ -2463,8 +2456,6 @@ void ConfigurationWebServer::Initialise(FirmwareUpdater& updater, Mode serveMode
                 if (var == "WIND")           return values.windEnabled == "true" ? "checked" : "";
                 if (var == "GROUND_TRAFFIC") return values.groundTrafficEnabled == "true" ? "checked" : "";
                 if (var == "CLOCK")          return values.clockEnabled == "true" ? "checked" : "";
-                if (var == "CLOCK_24H_SELECTED") return values.clockFormat != "12h" ? "selected" : "";
-                if (var == "CLOCK_12H_SELECTED") return values.clockFormat == "12h" ? "selected" : "";
                 if (var == "MARKER_RADAR_SELECTED") return values.aircraftMarker == "radar" ? "selected" : "";
                 if (var == "MARKER_TRIANGLE_SELECTED") return values.aircraftMarker == "triangle" ? "selected" : "";
                 if (var == "MARKER_DOT_SELECTED") return values.aircraftMarker == "dot" ? "selected" : "";
@@ -2750,7 +2741,6 @@ void ConfigurationWebServer::Initialise(FirmwareUpdater& updater, Mode serveMode
         saveIfOneOf("speed-unit", { "knots", "meters-second" });
         saveIfOneOf("altitude-unit", { "feet", "meters", "kft" });
         saveIfOneOf("sweep-period", { "2", "5", "10", "18", "30" });
-        saveIfOneOf("clock-format", { "24h", "12h" });
         saveIfOneOf("aircraft-marker", { "radar", "triangle", "dot" });
         saveIfOneOf("auto-update", { "true", "false" });
 

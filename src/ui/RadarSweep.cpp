@@ -60,33 +60,41 @@ Settings LoadSettings(ConfigurationWebServer& configServer)
     return settings;
 }
 
-float Draw(LGFX_Sprite& backbuffer, const Settings& settings, unsigned long now)
+SweepState Compute(const Settings& settings, unsigned long now)
 {
     if (!settings.enabled)
-        return 0.0f;
+        return SweepState{};
 
     const float sweepAngle = (now % settings.periodMs) * (TWO_PI / settings.periodMs);
-    DrawScanLines(backbuffer,
-        SCREEN_SIZE_DIV_2 - 1,
-        SCREEN_SIZE_DIV_2 - 1,
-        SCREEN_SIZE_DIV_2 - 1 + (std::cos(sweepAngle) * SCREEN_SIZE_DIV_2),
-        SCREEN_SIZE_DIV_2 - 1 + (std::sin(sweepAngle) * SCREEN_SIZE_DIV_2),
-        SWEEP_THICKNESS, 128, SWEEP_SPACING
-    );
 
-    // DrawScanLines makes its brightest leading edge by offsetting the final
-    // ray perpendicular to the base angle. Use that same edge to reveal and
-    // advance aircraft, so the visual crossing and data update coincide.
+    // DrawFan makes its brightest leading edge by offsetting the final ray
+    // perpendicular to the base angle. Use that same edge to reveal and
+    // advance aircraft (and the clock), so the visual crossing and the data
+    // update coincide.
     static const float SWEEP_LEADING_EDGE_OFFSET = std::atan2(
         static_cast<float>(SWEEP_THICKNESS * SWEEP_SPACING),
         static_cast<float>(SCREEN_SIZE_DIV_2)
     );
 
-    float sweepUpdateAngle = sweepAngle + SWEEP_LEADING_EDGE_OFFSET;
-    if (sweepUpdateAngle >= TWO_PI)
-        sweepUpdateAngle -= TWO_PI;
+    float updateAngle = sweepAngle + SWEEP_LEADING_EDGE_OFFSET;
+    if (updateAngle >= TWO_PI)
+        updateAngle -= TWO_PI;
 
-    return sweepUpdateAngle;
+    return SweepState{sweepAngle, updateAngle};
+}
+
+void DrawFan(LGFX_Sprite& backbuffer, const Settings& settings, const SweepState& state)
+{
+    if (!settings.enabled)
+        return;
+
+    DrawScanLines(backbuffer,
+        SCREEN_SIZE_DIV_2 - 1,
+        SCREEN_SIZE_DIV_2 - 1,
+        SCREEN_SIZE_DIV_2 - 1 + (std::cos(state.angle) * SCREEN_SIZE_DIV_2),
+        SCREEN_SIZE_DIV_2 - 1 + (std::sin(state.angle) * SCREEN_SIZE_DIV_2),
+        SWEEP_THICKNESS, 128, SWEEP_SPACING
+    );
 }
 
 }

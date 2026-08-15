@@ -57,7 +57,7 @@ void PushFrame(LGFX_Sprite& frame);
 // mean resizing it two or three times a frame as the callers took turns, and
 // keying the buffers by call order would resize them all over again whenever
 // the wind went stale or the clock changed format.
-enum class TextSlot : uint8_t { Wind, ClockDigits, ClockSuffix, Location, Count };
+enum class TextSlot : uint8_t { Wind, ClockDigits, Location, Count };
 
 // One run of text, turned by the trim angle, centred on (centreX, centreY) in
 // `target`. Font, size and colour come from `target`, exactly as they would for

@@ -17,7 +17,7 @@ float trimDegrees = 0.0f;
 constexpr int FACE_CENTRE = SCREEN_SIZE_DIV_2 - 1;
 
 // A run that wants more than this is drawn square instead of turned. Nothing on
-// the face comes close -- the clock is the widest at around 183 -- so this is
+// the face comes close -- the clock is the widest at around 260 -- so this is
 // only here to keep a mistake somewhere else from asking for a buffer the size
 // of the heap.
 constexpr int MAX_TEXT_BUFFER = 448;
@@ -33,14 +33,15 @@ struct TurnedText {
     // Where the run is drawn square, and where it is kept once turned. Two
     // buffers rather than one because the turning is what this is trying to
     // stop doing every frame: these runs change their contents far less often
-    // than they are drawn -- a clock ticks once a minute against thirty frames
-    // a second, a location name never -- so the expensive step happens when the
-    // text changes, and every frame in between is a plain copy of the result.
+    // than they are drawn -- the clock's figures only turn over as the sweep
+    // beam passes them, a location name never -- so the expensive step happens
+    // when the text changes, and every frame in between is a plain copy of the
+    // result.
     //
     // That is the whole reason this is affordable. Resampling thirty thousand
     // pixels per frame is what put the radar at thirteen frames a second;
-    // resampling them once a minute costs nothing measurable, and copying them
-    // is the same work as drawing the text was in the first place.
+    // resampling them a few times a revolution costs nothing measurable, and
+    // copying them is the same work as drawing the text was in the first place.
     LGFX_Sprite square;
     LGFX_Sprite turned;
 

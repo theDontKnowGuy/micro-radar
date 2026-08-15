@@ -24,11 +24,6 @@ private:
         SolveLabels
     };
 
-    enum class ClockFormat : uint8_t {
-        TwentyFourHour,
-        TwelveHour
-    };
-
     enum class AircraftMarkerStyle : uint8_t {
         RadarVector,
         Triangle,
@@ -77,7 +72,6 @@ private:
     // that changes most with where the radar is pointed, and a face centred on
     // an airport fills with parked aircraft the moment it is on.
     bool displayGroundTraffic = false;
-    ClockFormat clockFormat = ClockFormat::TwentyFourHour;
     String locationNameLabel;
     AircraftMarkerStyle aircraftMarkerStyle = AircraftMarkerStyle::RadarVector;
 
@@ -128,6 +122,20 @@ private:
     bool hasPreviousSweepAngle = false;
     bool sweepAppliedAircraftChanges = false;
 
+    // The clock's three figures -- hours, minutes, seconds -- each hold the
+    // last value latched into them, updated independently as the sweep beam
+    // passes the figure's position on the face rather than every frame. Kept
+    // in its own previous-angle pair rather than sharing the aircraft one
+    // above: that one is reset and bootstrapped by ApplySweepUpdates on its
+    // own schedule, and coupling the two would make the clock's timing depend
+    // on incidental call order instead of its own state.
+    int latchedClockHour = 0;
+    int latchedClockMinute = 0;
+    int latchedClockSecond = 0;
+    bool hasLatchedClock = false;
+    float previousClockSweepAngle = 0.0f;
+    bool hasPreviousClockSweepAngle = false;
+
     SemaphoreHandle_t networkStateMutex = nullptr;
     TaskHandle_t networkTaskHandle = nullptr;
     bool networkBusy = false;
@@ -174,6 +182,7 @@ private:
     void DrawAircraftInfo(LGFX_Sprite& backbuffer, const RenderAircraft& aircraft) const;
     void DrawLabelLeader(LGFX_Sprite& backbuffer, const RenderAircraft& aircraft) const;
     void DrawWindInfo(LGFX_Sprite& backbuffer) const;
+    void ApplyClockSweepUpdate(float sweepAngle, bool sweepEnabled);
     void DrawClock(LGFX_Sprite& backbuffer) const;
     void DrawLocationInfo(LGFX_Sprite& backbuffer) const;
     void DrawUpdateNotice(LGFX_Sprite& backbuffer) const;
@@ -240,6 +249,13 @@ public:
     // manual-update mode where a found release waits for the owner. Cheap
     // enough to set every frame; aircraft labels route around it once set.
     void ShowUpdateNotice(bool visible) { updateNoticeVisible.store(visible); }
+
+    // The range rings and the clock: the layer the sweep beam is drawn over,
+    // so it must be composed before the beam and go on top of nothing else.
+    // `sweepAngle` is this frame's beam position, from RadarSweep::Compute --
+    // needed here, ahead of the beam itself being drawn, so the clock's
+    // figures can be latched to the position they will be swept over at.
+    void DrawBackground(LGFX_Sprite& backbuffer, float sweepAngle, bool sweepEnabled);
 
     void Draw(
         LGFX_Sprite& backbuffer,
