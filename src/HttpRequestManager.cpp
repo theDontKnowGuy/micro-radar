@@ -1,5 +1,19 @@
 #include "HttpRequestManager.h"
 
+namespace {
+
+// HTTPClient's own default -- both for the initial TCP connect and for the
+// read loop that follows it -- is 5000ms (HTTPCLIENT_DEFAULT_TCP_TIMEOUT).
+// That is tight for a TLS handshake on this hardware even for a plain GET
+// (see the PSRAM note in platformio.ini) and too tight for the OpenSky auth
+// POST, which is a full handshake plus an OAuth2 exchange with Keycloak on
+// the other end -- exactly the request that was timing out with HTTP error
+// -11 (HTTPC_ERROR_READ_TIMEOUT) before this existed. Matches the timeout
+// FirmwareUpdater already uses for the same reason.
+constexpr uint32_t HTTP_TIMEOUT_MS = 15000;
+
+}  // namespace
+
 String HttpRequestManager::UrlEncode(const String& value)
 {
     String encoded;
@@ -46,6 +60,8 @@ HttpResult HttpRequestManager::Get(const String& url, const std::vector<std::pai
     const String fullUrl = url + queryParams;
 
     http.begin(fullUrl);
+    http.setTimeout(HTTP_TIMEOUT_MS);
+    http.setConnectTimeout(HTTP_TIMEOUT_MS);
 
     // add headers to request
     for (const auto& header : headers) {
@@ -78,6 +94,8 @@ HttpResult HttpRequestManager::Post(const String& url, const String& body, const
     HttpResult result{ false, 0, "", "" };
 
     http.begin(url);
+    http.setTimeout(HTTP_TIMEOUT_MS);
+    http.setConnectTimeout(HTTP_TIMEOUT_MS);
 
     // add headers to request
     for (const auto& header : headers) {

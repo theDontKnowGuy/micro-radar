@@ -680,6 +680,38 @@ void AircraftManager::RunAircraftFetch()
         }
     }
 
+    // OpenSky's box is square (lamin/lamax/lomin/lomax); the face is round and
+    // has its own configured radius, and ground traffic can be hidden entirely
+    // -- so a fetch that comes back full can still leave most of it undrawn.
+    // Run the same round-face + ground-traffic test Draw() applies per marker,
+    // once here, so that mismatch shows up in the log without waiting on a
+    // render pass to explain it.
+    if (fetchSucceeded) {
+        constexpr int RADAR_CENTRE = SCREEN_SIZE_DIV_2 - 1;
+        constexpr int MAX_MARKER_DISTANCE = SCREEN_SIZE_DIV_2 - 1;
+        size_t visibleCount = 0;
+        for (const auto& aircraft : fetchedAircraft) {
+            const bool groundHidden = aircraft.onGround && !displayGroundTraffic;
+            bool inRange = false;
+            if (!groundHidden) {
+                const auto [x, y] = ProjectCoordinateToScreen(aircraft.latitude, aircraft.longitude);
+                const int dx = x - RADAR_CENTRE;
+                const int dy = y - RADAR_CENTRE;
+                inRange = dx * dx + dy * dy <= MAX_MARKER_DISTANCE * MAX_MARKER_DISTANCE;
+            }
+            if (inRange)
+                ++visibleCount;
+
+            const char* callsign = aircraft.callsign.isEmpty() ? "----" : aircraft.callsign.c_str();
+            const char* status = groundHidden ? "ground, hidden" : (inRange ? "in range" : "outside display");
+            Serial.printf("[INFO]   %s %-8s %s\n",
+                          IcaoDisplayLabel(aircraft.icao24).c_str(), callsign, status);
+        }
+        Serial.printf("[INFO] OpenSky returned %u aircraft, %u within the round display\n",
+                      static_cast<unsigned>(fetchedAircraft.size()),
+                      static_cast<unsigned>(visibleCount));
+    }
+
     ReportFetchStatus(failure);
     PublishNetworkResult([&] {
         if (fetchSucceeded) {
@@ -1215,21 +1247,15 @@ void AircraftManager::Draw(
             maxMarkerDistance * maxMarkerDistance;
     };
 
-    // Ground traffic is deliberately excluded here even when it is being drawn:
-    // markers for it, never data blocks. An airport inside the face can hold
-    // more parked and taxiing aircraft than the whole label budget, and they
-    // would crowd out the airborne targets the budget exists to serve.
     for (auto& [icao, tracked] : trackedAircraft) {
         if (!tracked.visibleOnRadar)
             continue;
 
-        // Ticked before the ground test, not after: Tick() is what advances the
-        // blend towards a newly arrived position, and the marker loop below has
-        // no non-const access to do it. Skipping it here left taxiing aircraft
-        // parked at wherever they were one update ago.
+        // Ticked before the marker position is read: Tick() is what advances
+        // the blend towards a newly arrived position, and the marker loop
+        // below has no non-const access to do it. Doing this after the read
+        // left taxiing aircraft parked at wherever they were one update ago.
         tracked.Tick();
-        if (tracked.state.onGround)
-            continue;
         int x = 0;
         int y = 0;
         if (!getVisibleMarkerPosition(tracked, x, y))
@@ -1356,7 +1382,11 @@ AircraftManager::RenderAircraft AircraftManager::BuildRenderAircraft(
         ? IcaoDisplayLabel(tracked.state.icao24)
         : tracked.state.callsign;
 
-    if (displaySpeed && result.lineCount < 4) {
+    // A parked or taxiing aircraft's reported speed and barometric altitude are
+    // ground noise, not flight data -- a data block for one shows only its
+    // identity and route, the two lines that are still true while it sits at
+    // a gate.
+    if (!tracked.state.onGround && displaySpeed && result.lineCount < 4) {
         String speedLabel;
         if (displaySpeedInKnots) {
             const float speedKnots = tracked.state.velocity * 1.94384f;
@@ -1367,7 +1397,7 @@ AircraftManager::RenderAircraft AircraftManager::BuildRenderAircraft(
         result.lines[result.lineCount++] = speedLabel;
     }
 
-    if (displayAltitude && result.lineCount < 4) {
+    if (!tracked.state.onGround && displayAltitude && result.lineCount < 4) {
         String altitudeLabel;
         if (displayAltitudeInFeet) {
             const float altitudeFeet = tracked.state.baroAltitude * 3.28084f;
@@ -2325,7 +2355,7 @@ void AircraftManager::ResolveNextDestination()
         return;
 
     for (auto& [icao, tracked] : trackedAircraft) {
-        if (!tracked.visibleOnRadar || tracked.state.onGround ||
+        if (!tracked.visibleOnRadar ||
             tracked.state.callsign.isEmpty() || tracked.destinationLookupAttempted)
             continue;
 
