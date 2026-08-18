@@ -99,6 +99,7 @@ namespace lgfx
         if (!_slotBuf(s)) { return false; }
       }
       if (!_ensure(MAX_CHUNK)) { return false; }
+      if (!_grow(_dma, _dmaLen, MAX_CHUNK)) { return false; }
 
       // Resetting the chip with DMA transfers still in flight corrupts memory
       // during the next boot. The main loop already waits for the bus before a
@@ -124,6 +125,12 @@ namespace lgfx
         _buf = nullptr;
         _bufLen = 0;
       }
+      if (_dma)
+      {
+        heap_caps_free(_dma);
+        _dma = nullptr;
+        _dmaLen = 0;
+      }
       for (int s = 0; s < SLOTS; s++)
       {
         if (_chunk[s]) { heap_caps_free(_chunk[s]); _chunk[s] = nullptr; }
@@ -145,7 +152,14 @@ namespace lgfx
     {
       writeBytes(data, length, true, true);
     }
-    uint8_t* getDMABuffer(uint32_t length) override { return _ensure(length); }
+    // Deliberately not the command buffer. Panel_LCD fills what this returns
+    // and only then emits the CASET/RASET/RAMWR saying where it goes, so a
+    // shared buffer means every window's four address bytes land on top of the
+    // first two pixels of the run about to be sent -- which is a keyed push of
+    // text arriving with the leading pixels of every stroke recoloured, and a
+    // full-frame push arriving with two junk pixels at the start of every
+    // scanline.
+    uint8_t* getDMABuffer(uint32_t length) override { return _grow(_dma, _dmaLen, length); }
 
     uint32_t getClock(void) const override { return _cfg.freq_write; }
     void setClock(uint32_t freq) override { _cfg.freq_write = freq; }
@@ -240,8 +254,13 @@ namespace lgfx
   private:
     config_t _cfg;
     spi_device_handle_t _spi = nullptr;
+    // Staging for commands and other scalar writes.
     uint8_t* _buf = nullptr;
     uint32_t _bufLen = 0;
+
+    // Staging for the bulk pixel runs LovyanGFX composes through getDMABuffer.
+    uint8_t* _dma = nullptr;
+    uint32_t _dmaLen = 0;
 
     uint8_t* _chunk[SLOTS] = {};
     spi_transaction_t _trans[SLOTS] = {};
@@ -319,21 +338,23 @@ namespace lgfx
       gpio_set_level((gpio_num_t)_cfg.pin_dc, data ? 1 : 0);
     }
 
+    uint8_t* _ensure(uint32_t length) { return _grow(_buf, _bufLen, length); }
+
     // Grows without ever dropping the existing buffer. The previous version
     // freed first and then allocated, so a failed allocation under memory
-    // pressure left _buf null and handed callers a null pointer to draw into --
-    // turning a transient low-heap moment into corrupted output.
-    uint8_t* _ensure(uint32_t length)
+    // pressure left the caller holding a null pointer to draw into -- turning a
+    // transient low-heap moment into corrupted output.
+    uint8_t* _grow(uint8_t*& buf, uint32_t& capacity, uint32_t length)
     {
-      if (length <= _bufLen) { return _buf; }
+      if (length <= capacity) { return buf; }
 
       uint8_t* grown = (uint8_t*)heap_caps_malloc(length, MALLOC_CAP_DMA);
-      if (!grown) { return _buf; } // keep what we have rather than losing it
+      if (!grown) { return buf; } // keep what we have rather than losing it
 
-      if (_buf) { heap_caps_free(_buf); }
-      _buf = grown;
-      _bufLen = length;
-      return _buf;
+      if (buf) { heap_caps_free(buf); }
+      buf = grown;
+      capacity = length;
+      return buf;
     }
 
     // Synchronous send, used for commands and other small writes. Any queued

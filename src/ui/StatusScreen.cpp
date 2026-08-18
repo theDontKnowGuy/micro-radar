@@ -50,11 +50,19 @@ constexpr int LineGap = 6;
 // Sized to the denser of the two codes this screen draws, not the shorter one:
 // the config address is 25 modules a side and would be happy with less, but the
 // WiFi join code -- WIFI:T:nopass;S:<ssid>;; is long enough to force version 3,
-// 29 modules -- needs 111px to clear three pixels a module. Anything under that
-// leaves it at two, which is where a phone stops being able to focus, and which
-// is exactly the plate a hundred-pixel budget used to hand it. What is left over
-// is what the heading and the lines are read from.
-constexpr int BadgeBudget = 111;
+// 29 modules -- and with its quiet zone that is a 37-module plate. 148 is what
+// puts four pixels under every one of them. What is left over is what the
+// heading and the lines are read from.
+//
+// Four rather than the three a 111px budget bought, because three is where a
+// phone starts failing to read these off the glass. Not for want of focus: at
+// three pixels a module the pattern sits close enough to what a phone sensor
+// can resolve at arm's length that it aliases, and an aliased code reads as one
+// whose module spacing wanders -- which is the thing a decoder gives up on.
+// A unit with a trim set was hiding this, because the rotation resamples the
+// finished frame and an antialiased grid does not beat against a sensor grid;
+// the codes only ever failed on the units presenting them pixel-exact.
+constexpr int BadgeBudget = 148;
 
 // Air above and below the badge. Wider than the gap between two lines of text,
 // because the badge is not a line of text: the code needs to read as its own

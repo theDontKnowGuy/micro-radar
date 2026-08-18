@@ -7,10 +7,21 @@
 namespace PanelTrim {
 namespace {
 
-// Zero means "no correction", and every path here tests it rather than carrying
-// a separate flag: an angle is only ever stored once the buffer behind it
-// exists, so the two cannot disagree.
+// The angle being applied, which may legitimately be zero.
 float trimDegrees = 0.0f;
+
+// Whether the full-screen UIs are composing into the scratch buffer, which they
+// do whether or not there is an angle to apply. Separate from trimDegrees
+// because the two really are different questions now: the buffer is about how a
+// screen reaches the panel, the angle only about what happens to it on the way.
+//
+// They used to be the same flag, on the reasoning that a zero angle has nothing
+// to correct and so needs no buffer. What that missed is that the trip through
+// the buffer is not only a rotation -- it is a resample, and a resample is what
+// gives these screens their graded edges. Skipping it at zero meant the one
+// configuration with nothing wrong with its glass was the only one drawing its
+// text raw, and it showed.
+bool composing = false;
 
 // The radar face's own centre -- the point its range rings are drawn about, and
 // so the point every placement on it is judged against.
@@ -65,8 +76,9 @@ constexpr uint32_t TEXT_BACKDROP = 0x000000u;
 // Sixteen bits per pixel where the radar backbuffer makes do with eight. The
 // boot logo is full-colour artwork, and RGB332 puts visible bands through the
 // blue of the wordmark; the radar face is green on black and never notices the
-// difference. Costs 259,200 bytes of PSRAM, and only on a unit that has a trim
-// set.
+// difference. Costs 259,200 bytes of PSRAM on every unit -- the radar keeps its
+// own backbuffer and never comes through here, so this is only ever live while
+// a full-screen UI is up.
 LGFX_Sprite scratch;
 
 // Carries a point round the same arc a turned run's letterforms travel.
@@ -96,8 +108,15 @@ void TurnAboutFace(int& x, int& y)
     y = FACE_CENTRE + static_cast<int>(lroundf(dx * sinTurn + dy * cosTurn));
 }
 
-// Sends a whole composed screen to the panel, turned. Rotating about the centre
-// is what makes it safe to do without clearing underneath first: the panel shows
+// Sends a whole composed screen to the panel, turned.
+//
+// Called at a zero angle too, where it is not a wasted copy: LovyanGFX blends
+// each destination pixel over a window of max(|cos|,|sin|)/zoom - 1 source
+// pixels, which at zoom 1.0 is a full pixel however small the angle, so a frame
+// that is not being turned at all still comes out of here graded.
+//
+// Rotating about the centre is what makes it safe to do without clearing
+// underneath first: the panel shows
 // the raster's inscribed circle, and rotating that circle about its own centre
 // maps it onto itself, so every visible pixel is always covered by some source
 // pixel. What the turned square fails to reach is its four corners, which sit
@@ -120,14 +139,13 @@ void PushTurned(LGFX_Sprite& frame, LovyanGFX* destination)
 bool Begin(float degrees)
 {
     trimDegrees = 0.0f;
+    composing = false;
 
     // Written the long way round so a NaN out of the stored setting falls
     // through to "no trim" rather than past the bounds check.
     const bool wanted = degrees != 0.0f
         && degrees >= -SCREEN_TRIM_MAX_DEGREES
         && degrees <= SCREEN_TRIM_MAX_DEGREES;
-    if (!wanted)
-        return true;
 
     // Same reasoning as the radar backbuffer: a quarter-megabyte out of the
     // internal heap would leave too little contiguous SRAM for the TLS
@@ -137,10 +155,14 @@ bool Begin(float degrees)
 
     scratch.setColorDepth(16);
     if (!scratch.createSprite(SCREEN_SIZE, SCREEN_SIZE)) {
-        Serial.printf("[WARN] no room for the %dx%d panel-trim buffer; drawing untrimmed\n",
+        Serial.printf("[WARN] no room for the %dx%d screen buffer; drawing straight to the panel\n",
                       SCREEN_SIZE, SCREEN_SIZE);
-        return false;
+        return !wanted;
     }
+    composing = true;
+
+    if (!wanted)
+        return true;
 
     // The per-slot text buffers are not allocated here. Their sizes come from
     // the text that goes in them, which nothing knows yet, so each one is made
@@ -170,15 +192,16 @@ float Degrees()
 
 LovyanGFX& Canvas(LGFX& tft)
 {
-    if (trimDegrees == 0.0f)
+    if (!composing)
         return tft;
     return scratch;
 }
 
 void Present(LGFX& tft)
 {
-    // Nothing to send: the caller has been drawing on the panel all along.
-    if (trimDegrees == 0.0f)
+    // Nothing to send: the buffer would not allocate, so the caller has been
+    // drawing on the panel all along.
+    if (!composing)
         return;
 
     PushTurned(scratch, &tft);

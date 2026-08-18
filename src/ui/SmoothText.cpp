@@ -1,5 +1,6 @@
 #include "ui/SmoothText.h"
 
+#include <algorithm>
 #include <cmath>
 
 namespace SmoothText {
@@ -60,6 +61,107 @@ float ScaleFor(LovyanGFX& gfx, int height)
 {
     const int masterHeight = gfx.fontHeight(Master);
     return masterHeight > 0 ? static_cast<float>(height) / masterHeight : 0.0f;
+}
+
+// `master` area-averaged down into `scaled`: every destination pixel is the mean
+// of the exact source rectangle behind it, each source pixel weighted by how
+// much of it that rectangle actually covers.
+//
+// Doing this by hand rather than through pushRotateZoomWithAA, which is here to
+// do exactly this and does not. Its averaging window is (1/zoom - 1) source
+// pixels across -- one pixel narrower than the 1/zoom the ratio calls for --
+// and the shortfall is a whole pixel at every ratio, so it hurts most where the
+// reduction is gentlest. Coming down from the master at the 47px size these
+// screens set their headings in, 1/zoom is 1.60 and the window is 0.60: narrower
+// than a single source pixel, which means source and end coordinates land on the
+// same pixel and the copy takes its nearest-neighbour fast path. The heading is
+// point-sampled, at the cost of a resample and with none of the benefit.
+//
+// That is also why this only ever looked right on a unit with a trim set. The
+// trim resamples the finished frame again on the way to the panel, at zoom 1.0
+// where the same expression gives a window of 0.9998 -- a full pixel, a real
+// 2x2 blend -- so the smoothing everyone was seeing came from the rotation and
+// not from here.
+// One source row at a time, and a destination row's worth of ink. Both are
+// bounded by MaxMasterWidth -- DrawCentre turns away anything wider before a
+// buffer is made -- and the scaled run is never wider than the master it came
+// from, so one size covers both.
+uint16_t sourceRow[MaxMasterWidth];
+float destinationInk[MaxMasterWidth];
+
+void Resample(LGFX_Sprite& master, LGFX_Sprite& scaled, uint32_t colour)
+{
+    const int srcWidth = master.width();
+    const int srcHeight = master.height();
+    const int dstWidth = scaled.width();
+    const int dstHeight = scaled.height();
+    if (srcWidth <= 0 || srcHeight <= 0 || dstWidth <= 0 || dstHeight <= 0
+     || srcWidth > MaxMasterWidth || dstWidth > MaxMasterWidth)
+        return;
+
+    // Taken from the buffer sizes rather than from the scale the caller worked
+    // them out with, so the rounding that produced them cannot leave the run
+    // sampling slightly past its own edge.
+    const float stepX = static_cast<float>(srcWidth) / dstWidth;
+    const float stepY = static_cast<float>(srcHeight) / dstHeight;
+
+    const uint32_t red = (colour >> 16) & 0xFF;
+    const uint32_t green = (colour >> 8) & 0xFF;
+    const uint32_t blue = colour & 0xFF;
+
+    for (int dy = 0; dy < dstHeight; dy++) {
+        const float top = dy * stepY;
+        const float bottom = std::min(top + stepY, static_cast<float>(srcHeight));
+        const int lastRow = std::min(srcHeight - 1, static_cast<int>(ceilf(bottom)) - 1);
+
+        for (int dx = 0; dx < dstWidth; dx++)
+            destinationInk[dx] = 0.0f;
+
+        for (int sy = static_cast<int>(top); sy <= lastRow; sy++) {
+            const float rows = std::min(bottom, static_cast<float>(sy + 1))
+                             - std::max(top, static_cast<float>(sy));
+
+            // A row at a time rather than a pixel at a time. readPixel builds a
+            // pixelcopy and calls into the panel for every pixel it is asked
+            // for, which over a master this size is a tenth of a second a run.
+            master.readRect(0, sy, srcWidth, 1, sourceRow);
+
+            for (int dx = 0; dx < dstWidth; dx++) {
+                const float left = dx * stepX;
+                const float right = std::min(left + stepX, static_cast<float>(srcWidth));
+                const int lastCol = std::min(srcWidth - 1, static_cast<int>(ceilf(right)) - 1);
+
+                for (int sx = static_cast<int>(left); sx <= lastCol; sx++) {
+                    // How much of this destination pixel is ink, not what
+                    // colour the ink is. The master carries one colour on the
+                    // backdrop and nothing else, so coverage is the whole
+                    // story -- and a test against black is the one test that
+                    // holds whatever pixel format the buffer happens to store,
+                    // which is what the last attempt at this got wrong: it read
+                    // RGB565 as though it were RGB888 and turned the green
+                    // wordmark blue.
+                    if (sourceRow[sx] == Backdrop)
+                        continue;
+                    destinationInk[dx] += rows * (std::min(right, static_cast<float>(sx + 1))
+                                                - std::max(left, static_cast<float>(sx)));
+                }
+            }
+        }
+
+        // The area behind a destination pixel is the same on every row that
+        // feeds it, so it is worked out from the window rather than summed.
+        for (int dx = 0; dx < dstWidth; dx++) {
+            const float left = dx * stepX;
+            const float area = (std::min(left + stepX, static_cast<float>(srcWidth)) - left)
+                             * (bottom - top);
+            const float coverage = area > 0.0f ? destinationInk[dx] / area : 0.0f;
+
+            scaled.drawPixel(dx, dy, lgfx::color888(
+                static_cast<uint8_t>(lroundf(red * coverage)),
+                static_cast<uint8_t>(lroundf(green * coverage)),
+                static_cast<uint8_t>(lroundf(blue * coverage))));
+        }
+    }
 }
 
 // The run drawn the way it always was: one bit per pixel, stepped edges, in
@@ -154,24 +256,19 @@ void DrawCentre(LovyanGFX& canvas, const String& text, int centreX, int top,
         for (int dx = 0; dx <= EmboldenX; dx++)
             master.drawString(text, Margin + dx, Margin + dy);
 
-    // The step that does the work. Always the antialiasing resampler: it
-    // integrates each destination pixel over the whole source area behind it,
-    // which for a run coming down by a third or more is the difference between
-    // a graded edge and a differently-stepped one.
-    scaled.fillScreen(Backdrop);
-    master.setPivot(masterWidth * 0.5f, masterHeight * 0.5f);
-    master.pushRotateZoomWithAA(&scaled,
-                                scaledWidth * 0.5f, scaledHeight * 0.5f,
-                                0.0f, scale, scale);
+    // The step that does the work, and the whole reason the master exists.
+    Resample(master, scaled, colour);
 
     // Placed so the run lands exactly where drawCentreString would have put it:
     // centred on centreX, line box starting on `top`. The run sits centred in
     // the master horizontally, so the width falls out; vertically it is a
     // margin down from the top of it, which is what the last term takes back.
-    const float boxTop = (scaledHeight - masterHeight * scale) * 0.5f;
+    // Resample() maps the master's top-left corner onto the buffer's, so the
+    // margin comes down by the ratio the buffers actually ended up in.
+    const float scaleY = static_cast<float>(scaledHeight) / masterHeight;
     scaled.pushSprite(&canvas,
                       static_cast<int>(lroundf(centreX - scaledWidth * 0.5f)),
-                      static_cast<int>(lroundf(top - boxTop - Margin * scale)),
+                      static_cast<int>(lroundf(top - Margin * scaleY)),
                       Backdrop);
 
     master.deleteSprite();

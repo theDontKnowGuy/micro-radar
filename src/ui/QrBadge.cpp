@@ -5,9 +5,19 @@
 namespace QrBadge {
 namespace {
 
-// Match the rest of the panel UI: green modules on a black plate.
+// White modules on a black plate, where the rest of the panel UI is green on
+// black. The odd one out on purpose: this is the only thing on any of these
+// screens that is read by a camera rather than by a person.
+//
+// Green costs a code twice over. It is the dimmer half of the contrast a
+// decoder is looking for, and -- the part that actually matters here -- on an
+// RGB stripe panel a pure green fill lights one subpixel in three. A module
+// four pixels wide is then four narrow green stripes with dark gaps between
+// them, which is a finer and fainter pattern than the module grid it is meant
+// to be, and it is the module grid a decoder has to recover. White lights all
+// three, so a module is a solid block of the width it claims.
 constexpr uint32_t PLATE_COLOR = lgfx::color888(0, 0, 0);
-constexpr uint32_t MODULE_COLOR = lgfx::color888(0, 255, 0);
+constexpr uint32_t MODULE_COLOR = lgfx::color888(255, 255, 255);
 
 int PlateModules(const Code& code)
 {
