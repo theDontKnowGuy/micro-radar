@@ -22,7 +22,7 @@
 //
 // Keep the date as YYYY-MM-DD and the notes to a sentence -- the notes are
 // rendered on a phone-width page.
-#define FIRMWARE_RELEASED "2026-08-15"
+#define FIRMWARE_RELEASED "2026-08-18"
 #define FIRMWARE_NOTES "fix status page font rotation"
 
 // Identifies which hardware build this binary is for. Set per environment in
