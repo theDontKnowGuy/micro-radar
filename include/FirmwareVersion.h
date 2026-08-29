@@ -9,7 +9,7 @@
 //
 // Format is MAJOR.MINOR.PATCH. FirmwareUpdater compares the three components
 // numerically rather than as text, so 1.10.0 correctly sorts above 1.9.0.
-#define FIRMWARE_VERSION "1.8.7"
+#define FIRMWARE_VERSION "1.8.8"
 
 // When this version was published, and what changed in it. Both are shown on
 // the configuration page so the running firmware can describe itself, which
@@ -22,8 +22,8 @@
 //
 // Keep the date as YYYY-MM-DD and the notes to a sentence -- the notes are
 // rendered on a phone-width page.
-#define FIRMWARE_RELEASED "2026-08-18"
-#define FIRMWARE_NOTES "fix status page font rotation"
+#define FIRMWARE_RELEASED "2026-08-29"
+#define FIRMWARE_NOTES "New confiuguration page"
 
 // Identifies which hardware build this binary is for. Set per environment in
 // platformio.ini and used as the key into the manifest's "builds" object, so a

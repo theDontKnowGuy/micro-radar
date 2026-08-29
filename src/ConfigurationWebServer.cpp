@@ -94,11 +94,11 @@ struct PageValues {
     // Wi-Fi section and the mode it is being shown in.
     String setupMode, wifiSsid, wifiPassPlaceholder;
     String networkNote, networkOpen, networkSummary, forgetHidden, saveLabel;
-    String netIp, netRssi, netMac, netUptime, netHeap;
+    String netIp, netRssi, netMac, netUptime, netHeap, netStatus;
 
-    // Tab strip. Hidden on the setup hotspot, where the network is the only
-    // thing worth setting and the other two tabs have nothing to offer yet.
-    String tabsHidden, openskyHidden;
+    // Group rail. Hidden on the setup hotspot, where the network is the only
+    // thing worth setting and the other groups have nothing to offer yet.
+    String navHidden, openskyHidden;
 };
 
 // The radar has no login, so anything on the LAN can already reconfigure it on
@@ -186,980 +186,1167 @@ static const char CONFIG_HTML[] PROGMEM = R"(
         <style>
             :root {
                 color-scheme: dark;
-                --page: rgb(5 13 11);
-                --panel: rgb(10 24 20);
-                --section: rgb(12 31 25);
-                --control: rgb(8 21 18);
-                --control-hover: rgb(13 39 29);
-                --line: rgb(34 197 94 / .24);
-                --line-strong: rgb(74 222 128 / .55);
-                --text: rgb(209 250 229);
-                --muted: rgb(110 170 139);
-                --green: rgb(74 222 128);
-                --green-strong: rgb(34 197 94);
+                --ground: rgb(5 11 10);
+                --surface: rgb(10 21 19);
+                --card: rgb(13 29 25);
+                --field: rgb(7 18 17);
+                --hair: rgb(122 226 172 / .13);
+                --hair-strong: rgb(122 226 172 / .24);
+                --text: rgb(216 239 227);
+                --dim: rgb(127 164 146);
+                --faint: rgb(85 115 100);
+                --phos: rgb(91 231 155);
+                --phos-deep: rgb(47 169 108);
+                --amber: rgb(232 194 94);
+                --clay: rgb(232 121 107);
 
-                /* A fieldset paints its top border through the middle of its
-                   legend rather than along the top of its box, so the panel's
-                   visible top line is half a legend below where the geometry
-                   APIs put the panel. The corner mark has to sit on that line,
-                   so it is offset from these two rather than from a measured
-                   constant that would drift the moment the legend changes
-                   size. Legend height is pinned for the same reason. */
-                --legend-height: 4rem;
-                --mark-size: 88px;
+                /* Width of the control column every row's input lands in. One
+                   number rather than a width on each control is what keeps the
+                   right-hand edge straight down a card of mixed inputs. */
+                --control: 15rem;
+                --rail: 16.5rem;
+                --app-radius: 1rem;
             }
             * {
                 box-sizing: border-box;
             }
             html {
-                background: var(--page);
+                background: var(--ground);
             }
             body {
                 margin: 0;
                 min-height: 100vh;
-                /* Top padding has to clear the half of the corner mark that
-                   sits above the panel, or it is cut off by the viewport. */
-                padding: 2.6rem 0 1.5rem;
+                padding: 1.5rem 1rem 3rem;
                 background:
-                    radial-gradient(circle at 140px 70px, rgb(34 197 94 / .11), transparent 430px),
-                    linear-gradient(145deg, rgb(4 12 10), rgb(8 20 17));
+                    radial-gradient(900px 420px at 15rem 0rem, rgb(91 231 155 / .07), transparent 70rem),
+                    var(--ground);
                 color: var(--text);
                 font-family:
                     ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
                     "Segoe UI", sans-serif;
-                font-size: 14px;
-                line-height: 1.45;
+                font-size: 15px;
+                line-height: 1.5;
+                -webkit-font-smoothing: antialiased;
             }
-            button,
-            input,
-            select {
+            h1, h2, p, dl, dd {
+                margin: 0;
+            }
+            button, input, select {
                 font: inherit;
-            }
-            input:not([type="checkbox"]),
-            select {
-                min-width: 0;
-                border: 1px solid var(--line);
-                border-radius: .7rem;
-                outline: none;
-                background: var(--control);
-                color: var(--text);
-                padding: .65rem .75rem;
-                transition:
-                    border-color 140ms ease,
-                    background-color 140ms ease,
-                    box-shadow 140ms ease;
-            }
-            input:not([type="checkbox"]):hover,
-            select:hover {
-                background: var(--control-hover);
-            }
-            input:not([type="checkbox"]):focus,
-            select:focus {
-                border-color: var(--green);
-                box-shadow: 0 0 0 3px rgb(34 197 94 / .14);
-            }
-            input::placeholder {
-                color: rgb(110 170 139 / .55);
-            }
-            button {
-                border: 1px solid var(--line-strong);
-                border-radius: .7rem;
-                background: rgb(20 83 45 / .5);
-                color: var(--green);
-                padding: .65rem .9rem;
-                cursor: pointer;
-                transition:
-                    transform 120ms ease,
-                    border-color 120ms ease,
-                    background-color 120ms ease;
-            }
-            button:hover {
-                border-color: var(--green);
-                background: rgb(22 101 52 / .72);
-                transform: translateY(-1px);
-            }
-            button:focus-visible {
-                outline: none;
-                box-shadow: 0 0 0 3px rgb(34 197 94 / .16);
+                color: inherit;
             }
             a {
-                color: rgb(74 222 128 / .72);
+                color: var(--phos-deep);
             }
-            h2,
-            p {
-                margin-top: 0;
-            }
-            /* Exists only to be the corner mark's containing block. The panel
-               itself cannot be: it is a fieldset, and a fieldset's absolutely
-               positioned children measure top:0 from below the legend rather
-               than from the border, which drops the mark by exactly the
-               legend's height. */
-            .config-shell {
-                position: relative;
-                width: min(1040px, calc(100vw - 2rem));
-                margin: 0 auto;
-            }
-            .config-panel {
-                width: auto;
-                margin: 0;
-                /* Top padding clears the half of the corner mark that hangs
-                   inside the panel; it is positioned out of flow, so nothing
-                   else moves down to make room for it. */
-                padding: 3.2rem 1.35rem 1.35rem;
-                border: 1px solid var(--line);
-                border-radius: 1.4rem;
-                background: rgb(8 22 18 / .94);
-                box-shadow:
-                    0 24px 70px rgb(0 0 0 / .38),
-                    inset 0 1px rgb(255 255 255 / .035);
-            }
-            .config-panel > legend {
-                box-sizing: border-box;
-                display: inline-flex;
-                align-items: center;
-                height: var(--legend-height);
-                padding: 20px 3rem;
-                border: 1px solid var(--line);
-                border-radius: 1.4rem;
-                background: rgb(8 22 18);
-                color: var(--green);
-                font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-                font-size: 1.05rem;
-                font-weight: 650;
-                letter-spacing: .025em;
-            }
-            /* Centred on the panel's painted top border, on the corner
-               opposite the legend, so half the mark sits above the line. The
-               offset lands its middle on the legend's middle, which is where
-               that border is drawn -- see the note on --legend-height. Written
-               as a calc rather than a translate because a CSS percentage
-               cannot appear anywhere in this page: see the note above
-               CONFIG_HTML.
 
-               The disc is what hides the border line. The ring is open in the
-               middle, so without it the line would run straight through the
-               wordmark. The artwork is blue and the rest of the page is green
-               phosphor -- rather than recolour someone's logo, the halo around
-               it is the page's own accent. */
-            .masthead-mark {
-                position: absolute;
-                top: calc((var(--legend-height) - var(--mark-size)) / 2);
-                right: 1.6rem;
+            /* ---- frame ---- */
+
+            .app {
+                width: min(1180px, calc(100vw - 2rem));
+                margin: 0 auto;
+                border: 1px solid var(--hair-strong);
+                border-radius: var(--app-radius);
+                background: var(--surface);
+                box-shadow: 0 28px 80px rgb(0 0 0 / .45);
+            }
+            .topbar {
+                display: flex;
+                align-items: center;
+                gap: .8rem;
+                padding: .85rem 1.15rem;
+                border-bottom: 1px solid var(--hair);
+                border-radius: var(--app-radius) var(--app-radius) 0 0;
+                background: linear-gradient(180deg, rgb(17 38 34 / .55), transparent);
+            }
+            .brand-mark {
                 display: block;
-                width: var(--mark-size);
-                height: var(--mark-size);
+                width: 2.1rem;
+                height: 2.1rem;
+                flex: none;
                 border-radius: 50rem;
-                background: rgb(7 19 16);
-                box-shadow:
-                    0 0 22px rgb(56 130 246 / .22),
-                    0 0 46px rgb(34 197 94 / .07);
             }
-            .firmware-footer {
-                margin: 1.1rem 0 0;
-                padding-top: .8rem;
-                border-top: 1px solid var(--line);
-                color: var(--muted);
-                font-size: .78rem;
-                line-height: 1.45;
+            .brand-name {
+                display: block;
+                font-weight: 600;
+                font-size: .95rem;
+                letter-spacing: -.015em;
             }
-            .firmware-version {
-                color: var(--green);
-                font-weight: 650;
+            .brand-sub {
+                display: block;
+                color: var(--faint);
+                font-size: .72rem;
             }
-            .firmware-notes {
-                margin: .2rem 0 0;
+            .link-status {
+                display: flex;
+                align-items: center;
+                gap: .45rem;
+                margin-left: auto;
+                color: var(--dim);
+                font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+                font-size: .72rem;
+                text-align: right;
             }
-            .firmware-update {
-                margin: .45rem 0 0;
+            .pip {
+                width: .45rem;
+                height: .45rem;
+                flex: none;
+                border-radius: 50rem;
+                background: var(--phos);
+                box-shadow: 0 0 8px var(--phos);
             }
-            .project-footer {
-                margin: .8rem 0 0;
-                padding-top: .8rem;
-                border-top: 1px solid var(--line);
-                color: var(--muted);
-                font-size: .78rem;
-                line-height: 1.45;
+            body[data-net-mode="setup"] .pip {
+                background: var(--amber);
+                box-shadow: 0 0 8px var(--amber);
             }
-            .project-credit {
-                margin: .2rem 0 0;
+            .shell {
+                display: grid;
+                grid-template-columns: var(--rail) minmax(0, 1fr);
+            }
+            .shell.is-single {
+                grid-template-columns: minmax(0, 1fr);
+            }
+
+            /* ---- rail ---- */
+
+            .rail {
+                display: flex;
+                flex-direction: column;
+                gap: .15rem;
+                padding: .9rem .7rem;
+                border-right: 1px solid var(--hair);
+                border-bottom-left-radius: var(--app-radius);
+                background: rgb(7 17 15 / .5);
+            }
+            .rail[hidden] {
+                display: none;
+            }
+            .rail-search {
+                width: auto;
+                margin-bottom: .7rem;
+                padding: .45rem .6rem;
+                border: 1px solid var(--hair);
+                border-radius: .45rem;
+                background: var(--field);
+                font-size: .82rem;
+            }
+            .nav {
+                display: flex;
+                align-items: center;
+                gap: .6rem;
+                border: 0;
+                border-left: 2px solid transparent;
+                border-radius: .4rem;
+                padding: .5rem .6rem;
+                background: none;
+                color: var(--dim);
+                font-size: .88rem;
+                text-align: left;
+                cursor: pointer;
+                transition:
+                    background-color 140ms ease,
+                    color 140ms ease;
+            }
+            .nav:hover {
+                background: rgb(91 231 155 / .05);
+                color: var(--text);
+            }
+            .nav:focus-visible {
+                outline: 2px solid var(--phos);
+                outline-offset: -2px;
+            }
+            .nav[aria-current="true"] {
+                border-left-color: var(--phos);
+                background: rgb(91 231 155 / .13);
+                color: var(--text);
+                font-weight: 600;
+            }
+            .nav svg {
+                width: 1rem;
+                height: 1rem;
+                flex: none;
+                fill: none;
+                stroke: currentColor;
+                stroke-width: 1.5;
+                opacity: .75;
+            }
+            .nav[aria-current="true"] svg {
+                color: var(--phos);
+                opacity: 1;
+            }
+            /* Counts what has been touched in a group that may not be showing.
+               One Save covers every group, so a change made two groups ago has
+               to stay visible from wherever the next one is made. */
+            .nav-count {
+                display: none;
+                place-items: center;
+                min-width: 1.2rem;
+                height: 1.2rem;
+                margin-left: auto;
+                border-radius: 50rem;
+                background: var(--amber);
+                color: rgb(32 24 11);
+                font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+                font-size: .66rem;
+                font-weight: 600;
+            }
+            .nav.has-changes .nav-count {
+                display: grid;
+            }
+            .rail-foot {
+                margin-top: auto;
+                padding: .8rem .6rem 0;
+                border-top: 1px solid var(--hair);
+                color: var(--faint);
+                font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+                font-size: .68rem;
+                line-height: 1.7;
+            }
+
+            /* ---- content ---- */
+
+            .content {
+                display: flex;
+                flex-direction: column;
+                min-width: 0;
+                padding: 1.35rem 1.5rem 0;
+            }
+            .config-form {
+                display: flex;
+                flex-direction: column;
+                flex: 1;
+                min-width: 0;
+            }
+            .group-panel {
+                display: flex;
+                flex-direction: column;
+                gap: 1rem;
+                padding-bottom: 1.25rem;
+            }
+            /* display: flex above would otherwise beat the hidden attribute. */
+            .group-panel[hidden] {
+                display: none;
+            }
+            .group-head h2 {
+                font-size: 1.2rem;
+                font-weight: 600;
+                letter-spacing: -.02em;
+                text-wrap: balance;
+            }
+            .group-head p {
+                max-width: 62ch;
+                margin-top: .15rem;
+                color: var(--dim);
+                font-size: .87rem;
+            }
+
+            .card {
+                min-width: 0;
+                border: 1px solid var(--hair);
+                border-radius: .7rem;
+                overflow: hidden;
+                background: var(--card);
+            }
+            .card[hidden] {
+                display: none;
+            }
+            .card-title {
+                padding: .6rem 1rem .5rem;
+                border-bottom: 1px solid var(--hair);
+                background: rgb(91 231 155 / .025);
+                color: var(--faint);
+                font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+                font-size: .64rem;
+                font-weight: 500;
+                letter-spacing: .16em;
+                text-transform: uppercase;
+            }
+
+            /* One grammar for every setting on the page: what it is and one
+               line about it on the left, the control right-aligned in the
+               fixed column on the right. */
+            .row {
+                display: grid;
+                grid-template-columns: minmax(0, 1fr) var(--control);
+                align-items: center;
+                gap: 1.25rem;
+                padding: .8rem 1rem;
+            }
+            .row + .row,
+            .row + .network-details,
+            .network-details + .row {
+                border-top: 1px solid var(--hair);
+            }
+            .row.stack {
+                grid-template-columns: minmax(0, 1fr);
+                gap: .55rem;
+            }
+            /* display: grid above would otherwise beat the hidden attribute. */
+            .row[hidden] {
+                display: none;
+            }
+            /* A setting that only applies while the toggle above it is on.
+               Indented and ticked so it reads as subordinate before it is
+               switched off, not only afterwards. */
+            .row.is-dependent {
+                padding-left: 2rem;
+                background: rgb(91 231 155 / .018);
+            }
+            .row.is-dependent .row-name::before {
+                position: absolute;
+                top: .68em;
+                left: -1rem;
+                width: .6rem;
+                height: 1px;
+                background: var(--hair-strong);
+                content: "";
+            }
+            .row-label {
+                display: block;
+                min-width: 0;
+                cursor: pointer;
+            }
+            .row-name {
+                position: relative;
+                font-size: .92rem;
+                font-weight: 500;
+            }
+            .row-note {
+                max-width: 54ch;
+                margin-top: .1rem;
+                color: var(--faint);
+                font-size: .79rem;
+            }
+            .row-control {
+                display: flex;
+                align-items: center;
+                justify-content: flex-end;
+                gap: .5rem;
+                min-width: 0;
+            }
+            .row.is-off .row-control {
+                opacity: .35;
+            }
+            .row.is-off .row-name {
+                color: var(--dim);
+            }
+            .mono {
+                font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+                font-variant-numeric: tabular-nums;
+            }
+
+            /* ---- controls ---- */
+
+            select,
+            input:not([type="checkbox"]):not([type="range"]) {
+                width: auto;
+                min-width: 0;
+                border: 1px solid var(--hair-strong);
+                border-radius: .45rem;
+                outline: none;
+                background: var(--field);
+                color: var(--text);
+                padding: .45rem .55rem;
+                font-size: .85rem;
+                transition:
+                    border-color 140ms ease,
+                    box-shadow 140ms ease;
+            }
+            .row-control > select,
+            .row-control > input:not([type="checkbox"]) {
+                flex: 1 1 auto;
+            }
+            select:hover,
+            input:hover {
+                border-color: rgb(122 226 172 / .36);
+            }
+            select:focus,
+            input:focus {
+                border-color: var(--phos-deep);
+                box-shadow: 0 0 0 3px rgb(91 231 155 / .11);
+            }
+            input::placeholder {
+                color: var(--faint);
+            }
+            .switch {
+                position: relative;
+                width: 2.4rem;
+                height: 1.32rem;
+                flex: none;
+                margin: 0;
+                border: 1px solid rgb(122 226 172 / .28);
+                border-radius: 50rem;
+                appearance: none;
+                background: rgb(18 40 36);
+                cursor: pointer;
+                transition:
+                    border-color 160ms ease,
+                    background-color 160ms ease;
+            }
+            .switch::after {
+                position: absolute;
+                top: .16rem;
+                left: .18rem;
+                width: .86rem;
+                height: .86rem;
+                border-radius: 50rem;
+                background: rgb(127 164 146);
+                content: "";
+                transition:
+                    transform 160ms ease,
+                    background-color 160ms ease;
+            }
+            .switch:checked {
+                border-color: var(--phos);
+                background: var(--phos-deep);
+            }
+            .switch:checked::after {
+                background: rgb(234 255 243);
+                transform: translateX(1.05rem);
+            }
+            .switch:focus-visible {
+                outline: none;
+                box-shadow: 0 0 0 3px rgb(91 231 155 / .18);
+            }
+            .ghost {
+                flex: none;
+                border: 1px solid var(--hair-strong);
+                border-radius: .45rem;
+                background: none;
+                color: var(--dim);
+                padding: .42rem .7rem;
+                font-size: .82rem;
+                white-space: nowrap;
+                cursor: pointer;
+                transition:
+                    color 140ms ease,
+                    border-color 140ms ease,
+                    background-color 140ms ease;
+            }
+            .ghost:hover {
+                border-color: var(--phos-deep);
+                background: rgb(91 231 155 / .06);
+                color: var(--phos);
+            }
+            .ghost:focus-visible {
+                outline: 2px solid var(--phos);
+                outline-offset: 2px;
+            }
+            .ghost:disabled,
+            .ghost.is-offline {
+                opacity: .4;
+                cursor: not-allowed;
+            }
+            .ghost.danger {
+                border-color: rgb(232 121 107 / .38);
+                color: var(--clay);
+            }
+            .ghost.danger:hover {
+                border-color: var(--clay);
+                background: rgb(232 121 107 / .1);
+                color: rgb(243 171 160);
+            }
+            .ghost.danger:disabled:hover {
+                border-color: rgb(232 121 107 / .38);
+                background: none;
+                color: var(--clay);
             }
             .link-button {
                 border: 0;
                 padding: 0;
                 background: none;
-                color: var(--green);
+                color: var(--phos);
                 font: inherit;
+                font-size: .82rem;
                 text-decoration: underline;
                 cursor: pointer;
             }
             .link-button:hover {
                 filter: brightness(1.15);
             }
-            .link-button:disabled {
-                color: var(--muted);
+            .link-button:disabled,
+            .link-button.is-offline {
+                color: var(--faint);
                 text-decoration: none;
-                cursor: default;
+                cursor: not-allowed;
             }
-            .tab-bar {
-                display: flex;
-                gap: .4rem;
-                margin: .75rem 0 1rem;
-                padding: .3rem;
-                border: 1px solid var(--line);
-                border-radius: .9rem;
-                background: rgb(5 20 15 / .6);
+            .status-text {
+                color: var(--faint);
+                font-size: .79rem;
             }
-            .tab-bar[hidden] {
-                display: none;
+            .status-text:not(:empty) {
+                margin-top: .35rem;
             }
-            .tab-button {
-                flex: 1;
-                border: 1px solid transparent;
-                border-radius: .7rem;
-                background: none;
-                color: var(--muted);
-                font-weight: 650;
-                padding: .55rem .5rem;
-            }
-            .tab-button:hover {
-                border-color: var(--line);
-                background: rgb(13 39 29 / .6);
-                transform: none;
-            }
-            .tab-button[aria-selected="true"] {
-                border-color: var(--line-strong);
-                background: rgb(20 83 45 / .55);
-                color: var(--green);
-            }
-            .config-form {
-                display: flex;
-                flex-direction: column;
-                gap: 1rem;
-            }
-            .tab-panel {
-                display: flex;
-                flex-direction: column;
-                gap: 1rem;
-            }
-            /* display: flex above would otherwise beat the hidden attribute. */
-            .tab-panel[hidden] {
-                display: none;
-            }
-            .config-section {
-                min-width: 0;
-                border: 1px solid var(--line);
-                border-radius: 1rem;
-                padding: 1rem;
-                background:
-                    linear-gradient(145deg, rgb(15 40 31 / .82), rgb(9 27 22 / .9));
-                box-shadow: inset 0 1px rgb(255 255 255 / .025);
-            }
-            .config-section > legend {
-                padding: .15rem .55rem;
-                border-radius: 999px;
-                background: rgb(10 28 22);
-                color: var(--green);
-                font-weight: 650;
-            }
-            .section-note {
-                margin: 0 0 .85rem;
-                color: var(--muted);
-                font-size: .8rem;
-            }
-            .config-section fieldset {
-                min-width: 0;
-                border: 1px solid var(--line);
-                border-radius: .85rem;
-                background: rgb(5 20 15 / .55);
-            }
-            .config-section fieldset > legend {
-                padding: 0 .4rem;
-                color: var(--muted);
-            }
-            .coordinate-grid {
+
+            /* ---- composite controls ---- */
+
+            .pair {
                 display: grid;
                 grid-template-columns: repeat(2, minmax(0, 1fr));
-                gap: .9rem;
+                gap: .5rem;
             }
-            .field-row {
+            .search-row {
                 display: grid;
-                grid-template-columns: max-content minmax(0, 1fr);
-                align-items: center;
-                gap: .75rem;
+                grid-template-columns: minmax(0, 1fr) auto;
+                gap: .5rem;
             }
-            .field-row input {
+            .place-results {
+                grid-column: 1 / -1;
+                min-height: 7rem;
+            }
+            .radius-row {
+                display: flex;
+                align-items: center;
+                gap: 1rem;
+            }
+            /* The generic input rule dresses every non-checkbox input as a text
+               box, which would draw a border and padding around a slider. */
+            input[type="range"] {
+                flex: 1 1 auto;
                 width: auto;
                 min-width: 0;
+                border: 0;
+                padding: 0;
+                background: none;
+                accent-color: var(--phos);
             }
-            /* display: grid above would otherwise beat the hidden attribute. */
-            .field-row[hidden] {
+            .radius-readout {
+                min-width: 5rem;
+                color: var(--phos);
+                font-size: .85rem;
+                font-weight: 600;
+                text-align: right;
+                white-space: nowrap;
+            }
+            .radius-unit {
+                flex: none;
+                width: 6rem;
+            }
+            .stat-grid {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+                gap: .1rem 1.5rem;
+                padding: .85rem 1rem;
+            }
+            .stat-grid > div {
+                display: flex;
+                flex-direction: column;
+                padding: .3rem 0;
+            }
+            .stat-grid dt {
+                color: var(--faint);
+                font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+                font-size: .66rem;
+                letter-spacing: .13em;
+                text-transform: uppercase;
+            }
+            .stat-grid dd {
+                font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+                font-size: .85rem;
+            }
+
+            /* The Wi-Fi picker stays a details element: opening it is what
+               starts the scan, and a scan drops the station connection for a
+               moment -- which would cut off the very page asking for it. */
+            .network-details > summary {
+                display: grid;
+                grid-template-columns: minmax(0, 1fr) auto;
+                align-items: center;
+                gap: 1.25rem;
+                padding: .8rem 1rem;
+                cursor: pointer;
+                list-style: none;
+            }
+            /* display: grid above would otherwise beat the hidden attribute
+               the search puts on this row. */
+            .network-details > summary[hidden] {
                 display: none;
             }
-            .credentials {
-                display: grid;
-                gap: .75rem;
+            .network-details > summary::-webkit-details-marker {
+                display: none;
             }
-            .network-details > summary {
-                color: var(--green);
-                font-weight: 650;
+            .network-details > summary:hover {
+                background: rgb(91 231 155 / .04);
             }
-            .network-grid {
+            .network-details > summary:focus-visible {
+                outline: 2px solid var(--phos);
+                outline-offset: -2px;
+            }
+            .summary-action {
+                border: 1px solid var(--hair-strong);
+                border-radius: .45rem;
+                padding: .42rem .7rem;
+                color: var(--dim);
+                font-size: .82rem;
+                white-space: nowrap;
+            }
+            .network-details[open] > summary .summary-action {
+                border-color: var(--phos-deep);
+                color: var(--phos);
+            }
+            .network-body {
                 display: grid;
-                gap: .75rem;
+                gap: .7rem;
+                padding: .2rem 1rem 1rem;
             }
             .ssid-row {
                 display: grid;
                 grid-template-columns: minmax(0, 1fr) auto;
-                gap: .7rem;
+                gap: .5rem;
             }
-            .ssid-row select {
-                width: auto;
-            }
-            .network-diagnostics {
+            .stacked-field {
                 display: grid;
-                grid-template-columns: max-content minmax(0, 1fr);
-                gap: .2rem .75rem;
-                margin: .9rem 0 0;
-                color: var(--muted);
-                font-size: .78rem;
+                gap: .3rem;
             }
-            .network-diagnostics dd {
-                margin: 0;
-                color: var(--text);
-                font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            /* Same again: the typed-name field is hidden until the list's
+               "Other network" entry is chosen. */
+            .stacked-field[hidden] {
+                display: none;
             }
-            .network-actions {
-                display: flex;
-                align-items: center;
-                gap: 1rem;
-                flex-wrap: wrap;
-                margin-top: .9rem;
+            .stacked-field > span {
+                color: var(--dim);
+                font-size: .82rem;
             }
-            .is-offline {
-                opacity: .45;
-                cursor: not-allowed;
+            .fine-print {
+                color: var(--faint);
+                font-size: .76rem;
             }
-            .display-options {
-                display: grid;
-                grid-template-columns: repeat(2, minmax(0, 1fr));
-                gap: 1rem;
+            .card.danger {
+                border-color: rgb(232 121 107 / .3);
             }
-            .display-group {
-                min-width: 0;
-                border: 1px solid var(--line);
-                border-radius: .9rem;
-                background: rgb(5 20 15 / .74);
-                padding: .9rem;
-                box-shadow:
-                    0 8px 24px rgb(0 0 0 / .12),
-                    inset 0 1px rgb(255 255 255 / .025);
+            .card.danger .card-title {
+                border-bottom-color: rgb(232 121 107 / .22);
+                background: rgb(232 121 107 / .05);
+                color: var(--clay);
             }
-            .display-group-title {
-                margin: 0 0 .15rem;
-                color: var(--text);
-                font-size: .98rem;
-                font-weight: 650;
+            details.help {
+                padding: 0 1rem .8rem;
+                color: var(--faint);
+                font-size: .79rem;
             }
-            .display-group-note {
-                margin: 0 0 .75rem;
-                color: var(--muted);
-                font-size: .78rem;
-                min-height: 2.25rem;
+            details.help > summary {
+                color: var(--dim);
+                cursor: pointer;
             }
-            .display-option {
-                display: flex;
-                align-items: center;
-                justify-content: space-between;
-                gap: .75rem;
-                min-height: 3.35rem;
+            details.help p {
+                max-width: 66ch;
                 margin-top: .5rem;
-                padding: .55rem .7rem;
-                border: 1px solid rgb(34 197 94 / .13);
-                border-radius: .72rem;
-                background: rgb(10 34 25 / .68);
-                transition:
-                    border-color 120ms ease,
-                    background-color 120ms ease;
             }
-            .display-option > label {
-                min-width: 0;
+
+            /* ---- save ---- */
+
+            .no-matches {
+                padding: 2rem 0 1rem;
+                color: var(--faint);
+                font-size: .87rem;
             }
-            .display-toggle {
-                display: flex;
-                align-items: center;
-                justify-content: space-between;
-                gap: .75rem;
-                flex: 1;
-                cursor: pointer;
+            .no-matches[hidden] {
+                display: none;
             }
-            .display-option:hover {
-                border-color: var(--line);
-                background: rgb(13 45 32 / .78);
-            }
-            .display-toggle input[type="checkbox"] {
-                position: relative;
-                width: 2.55rem;
-                height: 1.4rem;
-                margin: 0;
-                border: 1px solid rgb(110 170 139 / .35);
-                border-radius: 999px;
-                appearance: none;
-                background: rgb(30 55 45);
-                cursor: pointer;
-                flex: none;
-                transition:
-                    border-color 140ms ease,
-                    background-color 140ms ease;
-            }
-            .display-toggle input[type="checkbox"]::after {
-                position: absolute;
-                top: .17rem;
-                left: .18rem;
-                width: .92rem;
-                height: .92rem;
-                border-radius: 999px;
-                background: rgb(167 202 184);
-                box-shadow: 0 1px 4px rgb(0 0 0 / .45);
-                content: "";
-                transition:
-                    transform 140ms ease,
-                    background-color 140ms ease;
-            }
-            .display-toggle input[type="checkbox"]:checked {
-                border-color: var(--green);
-                background: var(--green-strong);
-            }
-            .display-toggle input[type="checkbox"]:checked::after {
-                background: rgb(240 253 244);
-                transform: translateX(1.12rem);
-            }
-            .display-toggle input[type="checkbox"]:focus-visible {
-                outline: none;
-                box-shadow: 0 0 0 3px rgb(34 197 94 / .18);
-            }
-            .display-option select {
-                min-width: 0;
-                max-width: 14rem;
-                padding: .55rem .65rem;
-            }
-            .display-option .aircraft-marker-select {
-                width: 13.75rem;
-            }
-            .display-option .sweep-period-select {
-                width: 13.75rem;
-            }
-            .display-option .update-mode-select {
-                width: 13.75rem;
-            }
-            .display-option.is-disabled select {
-                opacity: .4;
-                cursor: not-allowed;
-            }
-            .location-action {
-                display: flex;
-                align-items: center;
-                gap: .8rem;
-                flex-wrap: wrap;
-            }
-            /* The generic input rule above dresses every non-checkbox input as
-               a text box, which draws a border and padding around a slider. */
-            input[type="range"] {
-                width: auto;
-                border: 0;
-                padding: 0;
-                background: none;
-                accent-color: var(--green);
-            }
-            input[type="range"]:hover {
-                background: none;
-            }
-            .radius-row {
-                display: grid;
-                grid-template-columns: minmax(0, 1fr) auto;
-                align-items: center;
-                gap: .9rem;
-            }
-            .radius-readout {
-                display: flex;
-                align-items: center;
-                gap: .6rem;
-                color: var(--green);
-                font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-                font-weight: 650;
-                white-space: nowrap;
-            }
-            .radius-readout select {
-                padding: .4rem .5rem;
-            }
-            .danger-zone {
-                border-color: rgb(248 113 113 / .4);
-            }
-            .danger-zone > legend {
-                color: rgb(252 165 165);
-            }
-            .danger-action {
-                display: flex;
-                align-items: center;
-                gap: 1rem;
-                flex-wrap: wrap;
-                margin-top: .75rem;
-            }
-            .danger-button {
-                border-color: rgb(248 113 113 / .6);
-                background: rgb(127 29 29 / .45);
-                color: rgb(254 202 202);
-            }
-            .danger-button:hover {
-                border-color: rgb(248 113 113);
-                background: rgb(153 27 27 / .62);
-            }
-            .danger-button:disabled {
-                opacity: .45;
-                cursor: not-allowed;
-                transform: none;
-            }
-            .danger-button:disabled:hover {
-                border-color: rgb(248 113 113 / .6);
-                background: rgb(127 29 29 / .45);
-                transform: none;
-            }
-            .place-search {
-                display: grid;
-                grid-template-columns: 1fr auto;
-                gap: .7rem;
-            }
-            .place-search input {
-                width: auto;
-            }
-            .place-results {
-                grid-column: 1 / -1;
-                width: auto;
-                min-height: 7rem;
-            }
-            .location-name input {
-                max-width: 18rem;
-            }
-            #place-result,
-            #location-result {
-                color: var(--muted);
-            }
-            details {
-                color: var(--muted);
-            }
-            details summary {
-                cursor: pointer;
-            }
-            details input {
-                width: auto;
-                display: block;
-            }
-            /* Sticky because Save applies to all three tabs at once: it has to
-               stay in view from wherever the last change was made, or the tab
-               that is showing reads as the only thing being saved. */
             .save-row {
                 position: sticky;
                 bottom: 0;
                 z-index: 2;
                 display: flex;
                 align-items: center;
-                gap: 1rem;
-                min-height: 3rem;
-                margin-top: .25rem;
-                padding: .75rem 0;
-                border-top: 1px solid var(--line);
-                background: rgb(8 22 18 / .97);
-            }
-            .save-state {
-                color: var(--muted);
-                font-size: .8rem;
-            }
-            .save-state.is-dirty {
-                color: rgb(250 204 21);
+                gap: .85rem;
+                margin: auto -1.5rem 0;
+                padding: .8rem 1.5rem;
+                border-top: 1px solid var(--hair);
+                background: rgb(10 21 19 / .97);
+                backdrop-filter: blur(6px);
             }
             .save-button {
-                border: 1px solid var(--green);
-                border-radius: .75rem;
-                background:
-                    linear-gradient(145deg, rgb(74 222 128), rgb(34 197 94));
-                color: rgb(3 24 14);
-                font-weight: 750;
-                padding: .7rem 1.25rem;
+                flex: none;
+                border: 0;
+                border-radius: .5rem;
+                background: rgb(26 43 39);
+                color: var(--faint);
+                padding: .55rem 1.15rem;
+                font-weight: 600;
+                font-size: .88rem;
                 cursor: pointer;
-                box-shadow: 0 8px 22px rgb(34 197 94 / .18);
                 transition:
-                    transform 120ms ease,
-                    filter 120ms ease;
+                    background-color 160ms ease,
+                    color 160ms ease,
+                    box-shadow 160ms ease;
             }
-            .save-button:hover {
-                filter: brightness(1.08);
-                transform: translateY(-1px);
+            .save-row.is-dirty .save-button {
+                background: var(--phos);
+                color: rgb(4 23 14);
+                box-shadow: 0 6px 20px rgb(91 231 155 / .2);
+            }
+            .save-row.is-dirty .save-button:hover {
+                filter: brightness(1.07);
+            }
+            .save-button:focus-visible {
+                outline: 2px solid var(--phos);
+                outline-offset: 2px;
+            }
+            .save-state {
+                color: var(--faint);
+                font-size: .82rem;
+            }
+            .save-row.is-dirty .save-state {
+                color: var(--amber);
             }
             #result {
-                color: var(--green);
+                color: var(--phos);
+                font-size: .82rem;
             }
-            .mt-2 {
-                margin-top: .5rem;
+            .save-note {
+                margin-left: auto;
+                color: var(--faint);
+                font-size: .74rem;
+                text-align: right;
             }
-            .mt-3 {
-                margin-top: .75rem;
+            .project-footer {
+                padding: .9rem 0 1.1rem;
+                border-top: 1px solid var(--hair);
+                color: var(--faint);
+                font-size: .76rem;
+                line-height: 1.6;
             }
-            .text-xs {
-                font-size: .75rem;
+            .project-footer a {
+                color: var(--phos-deep);
             }
-            .text-sm {
-                font-size: .85rem;
-            }
-            .underline {
-                text-decoration: underline;
-            }
-            @media (max-width: 820px) {
-                .config-shell {
-                    width: min(1040px, calc(100vw - 1.25rem));
+
+            @media (max-width: 900px) {
+                :root {
+                    --control: 11.5rem;
                 }
-                .display-options {
+                .shell {
                     grid-template-columns: minmax(0, 1fr);
                 }
-                .display-group-note {
-                    min-height: 0;
+                .rail {
+                    flex-direction: row;
+                    gap: .35rem;
+                    overflow-x: auto;
+                    padding: .6rem;
+                    border-right: 0;
+                    border-bottom: 1px solid var(--hair);
+                    border-bottom-left-radius: 0;
+                }
+                .rail-search,
+                .rail-foot {
+                    display: none;
+                }
+                .nav {
+                    border-bottom: 2px solid transparent;
+                    border-left: 0;
+                    white-space: nowrap;
+                }
+                .nav[aria-current="true"] {
+                    border-bottom-color: var(--phos);
                 }
             }
-            @media (max-width: 520px) {
+            @media (max-width: 620px) {
                 body {
-                    padding: 1.6rem 0 .5rem;
+                    padding: .75rem .5rem 2rem;
                 }
-                .config-shell {
-                    width: min(1040px, calc(100vw - .75rem));
+                :root {
+                    --app-radius: .8rem;
                 }
-                .config-panel {
-                    padding: 2.3rem .8rem .8rem;
-                    border-radius: 1rem;
+                .app {
+                    width: min(1180px, calc(100vw - 1rem));
                 }
-                .config-section {
-                    padding: .75rem;
-                    border-radius: .8rem;
+                .content {
+                    padding: 1rem .85rem 0;
                 }
-                .coordinate-grid {
+                .row,
+                .network-details > summary {
                     grid-template-columns: minmax(0, 1fr);
+                    gap: .55rem;
                 }
-                .field-row {
+                .row-control {
+                    justify-content: flex-start;
+                }
+                .radius-row {
+                    flex-wrap: wrap;
+                }
+                .ssid-row,
+                .search-row {
                     grid-template-columns: minmax(0, 1fr);
-                    gap: .3rem;
-                }
-                .place-search,
-                .ssid-row {
-                    grid-template-columns: 1fr;
                 }
                 .place-results {
                     grid-column: 1;
                 }
-                .display-option-select {
-                    align-items: stretch;
-                    flex-direction: column;
-                    gap: .35rem;
-                }
-                .display-option .aircraft-marker-select,
-                .display-option .sweep-period-select,
-                .display-option .update-mode-select {
-                    width: auto;
-                    max-width: none;
-                }
-                .display-option:not(.display-option-select) {
-                    gap: .55rem;
-                }
-                :root {
-                    --mark-size: 58px;
-                }
-                .masthead-mark {
-                    right: .9rem;
-                }
-                .tab-button {
-                    padding: .55rem .25rem;
-                    font-size: .9rem;
-                }
-                .radius-row {
-                    grid-template-columns: minmax(0, 1fr);
-                }
                 .save-row {
-                    align-items: flex-start;
-                    flex-direction: column;
-                    gap: .35rem;
+                    flex-wrap: wrap;
+                    margin: auto -.85rem 0;
+                    padding: .8rem .85rem;
+                }
+                .save-note {
+                    display: none;
+                }
+            }
+            @media (prefers-reduced-motion: reduce) {
+                * {
+                    transition-duration: 1ms;
                 }
             }
         </style>
     </head>
     <body data-net-mode="%NET_MODE%">
-      <div class="config-shell">
-        <fieldset class="config-panel">
-            <legend>Micro Radar Configuration</legend>
+      <div class="app">
 
-            <div class="tab-bar" role="tablist" aria-label="Configuration sections" %TABS_HIDDEN%>
-                <button type="button" class="tab-button" role="tab" data-tab="radar"
-                        id="tab-radar" aria-controls="panel-radar" aria-selected="true">Radar</button>
-                <button type="button" class="tab-button" role="tab" data-tab="setup"
-                        id="tab-setup" aria-controls="panel-setup" aria-selected="false">Setup</button>
-                <button type="button" class="tab-button" role="tab" data-tab="advanced"
-                        id="tab-advanced" aria-controls="panel-advanced" aria-selected="false">Advanced</button>
+        <header class="topbar">
+            <!--
+                The mark the panel itself shows at boot, so the page someone
+                opens next is recognisably the same device. Served from
+                /logo.png rather than inlined: it is the one asset here worth
+                caching, and it would otherwise be re-sent with every reload.
+            -->
+            <img class="brand-mark" src="/logo.png" width="34" height="34" alt="" aria-hidden="true">
+            <div>
+                <span class="brand-name">Micro Radar</span>
+                <span class="brand-sub">Configuration</span>
             </div>
+            <div class="link-status"><span class="pip" aria-hidden="true"></span>%NET_STATUS%</div>
+        </header>
+
+        <div class="shell" id="shell">
+
+            <nav class="rail" id="rail" aria-label="Settings groups" %NAV_HIDDEN%>
+                <input
+                    id="setting-search"
+                    class="rail-search"
+                    type="search"
+                    placeholder="Search settings"
+                    autocomplete="off"
+                    aria-label="Search settings">
+
+                <button type="button" class="nav" data-group="location" aria-controls="panel-location" aria-current="true">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="2.5"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg>
+                    Location &amp; range<span class="nav-count" aria-hidden="true">0</span>
+                </button>
+                <button type="button" class="nav" data-group="display" aria-controls="panel-display">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+                    Display<span class="nav-count" aria-hidden="true">0</span>
+                </button>
+                <button type="button" class="nav" data-group="connection" aria-controls="panel-connection">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5a10 10 0 0 1 14 0M8 16a5.5 5.5 0 0 1 8 0"/><circle cx="12" cy="19.5" r="1"/></svg>
+                    Connection<span class="nav-count" aria-hidden="true">0</span>
+                </button>
+                <button type="button" class="nav" data-group="device" aria-controls="panel-device">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 9h6v6H9zM2 9h2M2 15h2M20 9h2M20 15h2M9 2v2M15 2v2M9 20v2M15 20v2"/></svg>
+                    Firmware &amp; panel<span class="nav-count" aria-hidden="true">0</span>
+                </button>
+                <button type="button" class="nav" data-group="about" aria-controls="panel-about">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></svg>
+                    This radar<span class="nav-count" aria-hidden="true">0</span>
+                </button>
+
+                <div class="rail-foot">
+                    Firmware %FIRMWARE_VERSION%<br>
+                    %FIRMWARE_RELEASED%
+                </div>
+            </nav>
+
+            <div class="content">
 
             <!--
-                One form across all three tabs, and one Save. The tabs hide their
+                One form across every group, and one Save. The groups hide their
                 panels with the hidden attribute rather than removing them,
                 because /save reads every checkbox as "present means on" -- a
                 panel taken out of the document would submit as a row of
-                switched-off settings. Nothing here may be disabled for the same
-                reason, other than the unit selects that already follow their
-                own toggle.
+                switched-off settings. The same goes for a row the search box
+                filters out. Nothing here may be disabled for the same reason,
+                other than the selects that already follow their own toggle.
             -->
             <form id="cfg" action="/save" method="POST" class="config-form">
 
-                <div class="tab-panel" id="panel-radar" data-panel="radar"
-                     role="tabpanel" aria-labelledby="tab-radar">
+                <!-- ============ LOCATION & RANGE ============ -->
+                <section class="group-panel" id="panel-location" data-group="location">
+                    <div class="group-head">
+                        <h2>Location &amp; range</h2>
+                        <p>
+                            Where the radar is centred and how far out the face reaches.
+                            Everything on the display is drawn relative to this point.
+                        </p>
+                    </div>
 
-                    <fieldset class="config-section">
-                        <legend>Clock</legend>
-                        <div class="display-option">
-                            <label class="display-toggle" for="clock">
-                                <span>Show local time</span>
-                                <input id="clock" name="clock" type="checkbox" %CLOCK%>
+                    <div class="card">
+                        <h3 class="card-title">Centre point</h3>
+
+                        <div class="row" data-terms="latitude longitude coordinates position">
+                            <div>
+                                <div class="row-name">Coordinates</div>
+                                <div class="row-note">Latitude and longitude, in decimal degrees.</div>
+                            </div>
+                            <div class="row-control pair">
+                                <input
+                                    name="latitude"
+                                    id="latitude"
+                                    class="mono"
+                                    type="number"
+                                    min="-90"
+                                    step="0.000001"
+                                    max="90"
+                                    aria-label="Latitude"
+                                    value='%LATITUDE%'>
+                                <input
+                                    name="longitude"
+                                    id="longitude"
+                                    class="mono"
+                                    type="number"
+                                    min="-180"
+                                    step="0.000001"
+                                    max="180"
+                                    aria-label="Longitude"
+                                    value='%LONGITUDE%'>
+                            </div>
+                        </div>
+
+                        <div class="row stack" data-terms="find place search airport city landmark address geolocation">
+                            <div class="search-row">
+                                <input
+                                    id="place-query"
+                                    type="search"
+                                    placeholder="Find an airport, city, landmark or address"
+                                    autocomplete="off"
+                                    aria-label="Find a place">
+                                <button id="search-places" type="button" class="ghost">Search</button>
+                                <select
+                                    id="place-results"
+                                    class="place-results"
+                                    size="5"
+                                    hidden
+                                    aria-label="Place search results"></select>
+                            </div>
+                            <div class="fine-print">
+                                Or
+                                <button id="use-location" type="button" class="link-button">use my current location</button>.
+                                Search data &copy;
+                                <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap contributors</a>.
+                            </div>
+                            <div id="place-result" class="status-text" aria-live="polite"></div>
+                            <div id="location-result" class="status-text" aria-live="polite"></div>
+                        </div>
+
+                        <div class="row" data-terms="screen name label caption">
+                            <label class="row-label" for="location-name">
+                                <div class="row-name">Screen name</div>
+                                <div class="row-note">
+                                    Shown at the bottom of the radar face. Place search suggests a
+                                    short one. 18 characters.
+                                </div>
                             </label>
+                            <div class="row-control">
+                                <input
+                                    id="location-name"
+                                    name="location-name"
+                                    maxlength="18"
+                                    value="%LOCATION_NAME%"
+                                    aria-label="Screen name"
+                                    placeholder="e.g. Ben Gurion">
+                            </div>
                         </div>
-                    </fieldset>
+                    </div>
 
-                    <fieldset class="config-section">
-                        <legend>Location</legend>
-                        <p class="section-note">
-                            Where the radar is centred. Everything on the display is drawn
-                            relative to this point.
-                        </p>
-                        <div class="coordinate-grid">
-                        <label class="field-row">
-                            <span>Latitude:</span>
-                            <input
-                                name="latitude"
-                                id="latitude"
-                                type="number"
-                                min="-90"
-                                step="0.000001"
-                                max="90"
-                                value='%LATITUDE%'>
-                        </label>
+                    <div class="card">
+                        <h3 class="card-title">Coverage</h3>
 
-                        <label class="field-row">
-                            <span>Longitude:</span>
-                            <input
-                                name="longitude"
-                                id="longitude"
-                                type="number"
-                                min="-180"
-                                step="0.000001"
-                                max="180"
-                                value='%LONGITUDE%'>
-                        </label>
-                        </div>
-
-                        <div class="location-action mt-3">
-                        <button
-                            id="use-location"
-                            type="button">
-                            Use my current location
-                        </button>
-                        <span id="location-result" class="text-sm" aria-live="polite"></span>
-                        </div>
-
-                        <fieldset class="mt-3">
-                        <legend>Find a known place</legend>
-                        <div class="place-search">
-                            <input
-                                id="place-query"
-                                type="search"
-                                placeholder="Airport, city, landmark, or address"
-                                autocomplete="off">
-                            <button
-                                id="search-places"
-                                type="button">
-                                Search
-                            </button>
-                            <select
-                                id="place-results"
-                                class="place-results"
-                                size="5"
-                                hidden
-                                aria-label="Place search results"></select>
-                        </div>
-                        <div id="place-result" class="mt-2 text-sm" aria-live="polite"></div>
-                        <div class="mt-2 text-xs">
-                            Search data &copy;
-                            <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener"
-                               class="underline">OpenStreetMap contributors</a>.
-                            The provider is on the Advanced tab.
-                        </div>
-                        </fieldset>
-
-                        <label class="field-row location-name mt-3">
-                            <span>Screen name:</span>
-                            <input
-                                id="location-name"
-                                name="location-name"
-                                maxlength="18"
-                                value="%LOCATION_NAME%"
-                                placeholder="e.g. Ben Gurion">
-                        </label>
-                        <div class="mt-2 text-xs">Shown at the bottom of the radar display. Place search suggests a short name.</div>
-                    </fieldset>
-
-                    <fieldset class="config-section">
-                        <legend>Coverage</legend>
-                        <p class="section-note">
-                            How far out the edge of the radar face reaches, measured north to
-                            south from the centre. East to west spans the same number of
-                            degrees, which is less ground the further you are from the equator.
-                        </p>
-
-                        <div class="radius-row">
-                            <input
-                                id="radius-range"
-                                type="range"
-                                min="3"
-                                max="278"
-                                step="1"
-                                value="111"
-                                aria-label="Coverage radius">
-                            <div class="radius-readout">
-                                <output id="radius-readout" for="radius-range">111 km</output>
-                                <select id="distance-unit" name="distance-unit" aria-label="Distance units">
+                        <div class="row stack" data-terms="coverage radius range distance km miles degrees">
+                            <div class="radius-row">
+                                <input
+                                    id="radius-range"
+                                    type="range"
+                                    min="3"
+                                    max="278"
+                                    step="1"
+                                    value="111"
+                                    aria-label="Coverage radius">
+                                <output id="radius-readout" class="radius-readout mono" for="radius-range">111 km</output>
+                                <select id="distance-unit" name="distance-unit" class="radius-unit" aria-label="Distance units">
                                     <option value="km" %DISTANCE_KM_SELECTED%>km</option>
                                     <option value="mi" %DISTANCE_MI_SELECTED%>miles</option>
                                 </select>
                             </div>
+                            <div class="row-note">
+                                Measured north to south from the centre. East to west spans the same
+                                number of degrees, which is less ground the further you are from the
+                                equator.
+                            </div>
+
+                            <!--
+                                The stored setting is a half-width in degrees, which is
+                                what the projection divides by. The slider is the only
+                                thing that writes it, so opening the page and saving
+                                without touching anything leaves the stored value exactly
+                                as it was rather than re-rounding it through kilometres.
+                            -->
+                            <input type="hidden" id="radius" name="radius" value="%RADIUS%">
                         </div>
 
-                        <!--
-                            The stored setting is a half-width in degrees, which is
-                            what the projection divides by. The slider is the only
-                            thing that writes it, so opening the page and saving
-                            without touching anything leaves the stored value exactly
-                            as it was rather than re-rounding it through kilometres.
-                        -->
-                        <input type="hidden" id="radius" name="radius" value="%RADIUS%">
-
-                        <details class="mt-3 text-xs">
+                        <details class="help">
                             <summary>Set the radius in degrees</summary>
-                            <input
-                                id="radius-degrees"
-                                type="number"
-                                min="0.000001"
-                                step="0.000001"
-                                max="2.499999"
-                                class="mt-2"
-                                aria-label="Coverage radius in degrees">
+                            <p>
+                                <input
+                                    id="radius-degrees"
+                                    class="mono"
+                                    type="number"
+                                    min="0.000001"
+                                    step="0.000001"
+                                    max="2.499999"
+                                    aria-label="Coverage radius in degrees">
+                            </p>
                         </details>
-                    </fieldset>
+                    </div>
+                </section>
 
-                    <fieldset class="config-section">
-                        <legend>Display</legend>
-                        <div class="display-options">
-                            <section class="display-group" aria-labelledby="radar-appearance-title">
-                                <h2 id="radar-appearance-title" class="display-group-title">Radar appearance</h2>
-                                <p class="display-group-note">Sweep behavior and target presentation.</p>
+                <!-- ============ DISPLAY ============ -->
+                <section class="group-panel" id="panel-display" data-group="display" hidden>
+                    <div class="group-head">
+                        <h2>Display</h2>
+                        <p>What the scope draws, and how it draws it.</p>
+                    </div>
 
-                                <div class="display-option">
-                                    <label class="display-toggle" for="scanline">
-                                        <span>Animated radar sweep</span>
-                                        <input id="scanline" name="scanline" type="checkbox" %SCANLINE%>
-                                    </label>
-                                </div>
+                    <div class="card">
+                        <h3 class="card-title">Sweep</h3>
 
-                                <div class="display-option display-option-select">
-                                    <label for="sweep-period">Sweep speed</label>
-                                    <select
-                                        id="sweep-period"
-                                        name="sweep-period"
-                                        class="sweep-period-select"
-                                        aria-label="Radar sweep speed">
-                                        <option value="2" %SWEEP_2_SELECTED%>Very fast &middot; 2 s/rev</option>
-                                        <option value="5" %SWEEP_5_SELECTED%>Fast &middot; 5 s/rev</option>
-                                        <option value="10" %SWEEP_10_SELECTED%>Balanced &middot; 10 s/rev</option>
-                                        <option value="18" %SWEEP_18_SELECTED%>Classic &middot; 18 s/rev</option>
-                                        <option value="30" %SWEEP_30_SELECTED%>Slow &middot; 30 s/rev</option>
-                                    </select>
-                                </div>
-
-                                <div class="display-option display-option-select">
-                                    <label for="aircraft-marker">Aircraft symbol</label>
-                                    <select
-                                        id="aircraft-marker"
-                                        name="aircraft-marker"
-                                        class="aircraft-marker-select"
-                                        aria-label="Aircraft symbol">
-                                        <option value="radar" %MARKER_RADAR_SELECTED%>Radar block + vector</option>
-                                        <option value="triangle" %MARKER_TRIANGLE_SELECTED%>Aircraft triangle</option>
-                                        <option value="dot" %MARKER_DOT_SELECTED%>Simple dot</option>
-                                    </select>
-                                </div>
-
-                                <div class="display-option">
-                                    <label class="display-toggle" for="ground-traffic">
-                                        <span>Show aircraft on the ground</span>
-                                        <input id="ground-traffic" name="ground-traffic" type="checkbox" %GROUND_TRAFFIC%>
-                                    </label>
-                                </div>
-
-                                <div class="display-option">
-                                    <label class="display-toggle" for="wind">
-                                        <span>Show center surface wind</span>
-                                        <input id="wind" name="wind" type="checkbox" %WIND%>
-                                    </label>
-                                </div>
-
-                            </section>
-
-                            <section class="display-group" aria-labelledby="aircraft-labels-title">
-                                <h2 id="aircraft-labels-title" class="display-group-title">Aircraft labels</h2>
-                                <p class="display-group-note">Callsigns are always shown. Choose the additional lines below.</p>
-
-                                <div class="display-option">
-                                    <label class="display-toggle" for="speed">
-                                        <span>Show speed</span>
-                                        <input id="speed" name="speed" type="checkbox" %SPEED%>
-                                    </label>
-                                    <select id="speed-unit" name="speed-unit" aria-label="Speed units">
-                                        <option value="knots" %SPEED_KNOTS_SELECTED%>Knots</option>
-                                        <option value="meters-second" %SPEED_MS_SELECTED%>m/s</option>
-                                    </select>
-                                </div>
-
-                                <div class="display-option">
-                                    <label class="display-toggle" for="altitude">
-                                        <span>Show altitude</span>
-                                        <input id="altitude" name="altitude" type="checkbox" %ALTITUDE%>
-                                    </label>
-                                    <select id="altitude-unit" name="altitude-unit" aria-label="Altitude units">
-                                        <option value="feet" %ALTITUDE_FEET_SELECTED%>Feet</option>
-                                        <option value="meters" %ALTITUDE_METERS_SELECTED%>Metres</option>
-                                    </select>
-                                </div>
-
-                                <div class="display-option">
-                                    <label class="display-toggle" for="destination">
-                                        <span>Show route when available</span>
-                                        <input id="destination" name="destination" type="checkbox" %DESTINATION%>
-                                    </label>
-                                </div>
-                            </section>
+                        <div class="row" data-terms="sweep scanline animation trace">
+                            <label class="row-label" for="scanline">
+                                <div class="row-name">Animated radar sweep</div>
+                                <div class="row-note">The rotating trace. Off leaves a static face.</div>
+                            </label>
+                            <div class="row-control">
+                                <input id="scanline" name="scanline" class="switch" type="checkbox"
+                                       aria-label="Animated radar sweep" %SCANLINE%>
+                            </div>
                         </div>
-                    </fieldset>
-                </div>
 
-                <div class="tab-panel" id="panel-setup" data-panel="setup"
-                     role="tabpanel" aria-labelledby="tab-setup" hidden>
+                        <div class="row is-dependent" id="row-sweep-period" data-terms="sweep speed revolution seconds">
+                            <div><div class="row-name">Sweep speed</div></div>
+                            <div class="row-control">
+                                <select id="sweep-period" name="sweep-period" aria-label="Radar sweep speed">
+                                    <option value="2" %SWEEP_2_SELECTED%>Very fast &middot; 2 s/rev</option>
+                                    <option value="5" %SWEEP_5_SELECTED%>Fast &middot; 5 s/rev</option>
+                                    <option value="10" %SWEEP_10_SELECTED%>Balanced &middot; 10 s/rev</option>
+                                    <option value="18" %SWEEP_18_SELECTED%>Classic &middot; 18 s/rev</option>
+                                    <option value="30" %SWEEP_30_SELECTED%>Slow &middot; 30 s/rev</option>
+                                </select>
+                            </div>
+                        </div>
 
-                    <fieldset class="config-section">
-                        <legend>Wi-Fi network</legend>
-                        <p class="section-note">%NETWORK_NOTE%</p>
+                        <div class="row" data-terms="aircraft symbol marker triangle dot block vector">
+                            <div><div class="row-name">Aircraft symbol</div></div>
+                            <div class="row-control">
+                                <select id="aircraft-marker" name="aircraft-marker" aria-label="Aircraft symbol">
+                                    <option value="radar" %MARKER_RADAR_SELECTED%>Radar block + vector</option>
+                                    <option value="triangle" %MARKER_TRIANGLE_SELECTED%>Aircraft triangle</option>
+                                    <option value="dot" %MARKER_DOT_SELECTED%>Simple dot</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <h3 class="card-title">On the face</h3>
+
+                        <div class="row" data-terms="clock time local">
+                            <label class="row-label" for="clock">
+                                <div class="row-name">Local time</div>
+                                <div class="row-note">A clock in the centre of the scope.</div>
+                            </label>
+                            <div class="row-control">
+                                <input id="clock" name="clock" class="switch" type="checkbox"
+                                       aria-label="Show local time" %CLOCK%>
+                            </div>
+                        </div>
+
+                        <div class="row" data-terms="ground traffic taxiing parked">
+                            <label class="row-label" for="ground-traffic">
+                                <div class="row-name">Aircraft on the ground</div>
+                                <div class="row-note">Taxiing and parked traffic inside the coverage circle.</div>
+                            </label>
+                            <div class="row-control">
+                                <input id="ground-traffic" name="ground-traffic" class="switch" type="checkbox"
+                                       aria-label="Show aircraft on the ground" %GROUND_TRAFFIC%>
+                            </div>
+                        </div>
+
+                        <div class="row" data-terms="wind surface weather">
+                            <label class="row-label" for="wind">
+                                <div class="row-name">Surface wind at the centre</div>
+                                <div class="row-note">Direction and speed at the centre point.</div>
+                            </label>
+                            <div class="row-control">
+                                <input id="wind" name="wind" class="switch" type="checkbox"
+                                       aria-label="Show centre surface wind" %WIND%>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <h3 class="card-title">Aircraft labels &mdash; callsigns are always shown</h3>
+
+                        <div class="row" data-terms="speed knots velocity">
+                            <div><div class="row-name">Speed</div></div>
+                            <div class="row-control">
+                                <input id="speed" name="speed" class="switch" type="checkbox"
+                                       aria-label="Show speed" %SPEED%>
+                            </div>
+                        </div>
+                        <div class="row is-dependent" id="row-speed-unit" data-terms="speed units knots metres per second">
+                            <div><div class="row-name">Speed units</div></div>
+                            <div class="row-control">
+                                <select id="speed-unit" name="speed-unit" aria-label="Speed units">
+                                    <option value="knots" %SPEED_KNOTS_SELECTED%>Knots</option>
+                                    <option value="meters-second" %SPEED_MS_SELECTED%>m/s</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <div class="row" data-terms="altitude height flight level">
+                            <div><div class="row-name">Altitude</div></div>
+                            <div class="row-control">
+                                <input id="altitude" name="altitude" class="switch" type="checkbox"
+                                       aria-label="Show altitude" %ALTITUDE%>
+                            </div>
+                        </div>
+                        <div class="row is-dependent" id="row-altitude-unit" data-terms="altitude units feet metres">
+                            <div><div class="row-name">Altitude units</div></div>
+                            <div class="row-control">
+                                <select id="altitude-unit" name="altitude-unit" aria-label="Altitude units">
+                                    <option value="feet" %ALTITUDE_FEET_SELECTED%>Feet</option>
+                                    <option value="meters" %ALTITUDE_METERS_SELECTED%>Metres</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <div class="row" data-terms="route destination origin">
+                            <label class="row-label" for="destination">
+                                <div class="row-name">Route</div>
+                                <div class="row-note">Origin and destination, when the network reports them.</div>
+                            </label>
+                            <div class="row-control">
+                                <input id="destination" name="destination" class="switch" type="checkbox"
+                                       aria-label="Show route when available" %DESTINATION%>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- ============ CONNECTION ============ -->
+                <section class="group-panel" id="panel-connection" data-group="connection" hidden>
+                    <div class="group-head">
+                        <h2>Connection</h2>
+                        <p>The network the radar joins, and the services it asks for aircraft and place names.</p>
+                    </div>
+
+                    <div class="card">
+                        <h3 class="card-title">Wi-Fi</h3>
 
                         <details class="network-details" %NETWORK_OPEN%>
-                            <summary>%NETWORK_SUMMARY%</summary>
-                            <div class="network-grid mt-3">
+                            <summary data-terms="wifi network ssid password join hotspot">
+                                <div>
+                                    <div class="row-name">%NETWORK_SUMMARY%</div>
+                                    <div class="row-note">%NETWORK_NOTE%</div>
+                                </div>
+                                <span class="summary-action">Change network</span>
+                            </summary>
+
+                            <div class="network-body">
                                 <div class="ssid-row">
                                     <select
                                         id="wifi-ssid"
@@ -1168,15 +1355,11 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                                         aria-label="Available networks">
                                         <option value="">Looking for networks...</option>
                                     </select>
-                                    <button
-                                        id="rescan-wifi"
-                                        type="button">
-                                        Rescan
-                                    </button>
+                                    <button id="rescan-wifi" type="button" class="ghost">Rescan</button>
                                 </div>
 
-                                <label class="field-row" id="wifi-manual-row" hidden>
-                                    <span>Network name:</span>
+                                <label class="stacked-field" id="wifi-manual-row" hidden>
+                                    <span>Network name</span>
                                     <input
                                         id="wifi-ssid-manual"
                                         name="wifi-ssid-manual"
@@ -1187,8 +1370,8 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                                         placeholder="Hidden or out-of-range network name">
                                 </label>
 
-                                <label class="field-row">
-                                    <span>Password:</span>
+                                <label class="stacked-field">
+                                    <span>Password</span>
                                     <input
                                         id="wifi-pass"
                                         name="wifi-pass"
@@ -1199,22 +1382,28 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                                         placeholder="%WIFI_PASS_PLACEHOLDER%">
                                 </label>
 
-                                <div class="text-xs">
+                                <div class="fine-print">
                                     The radar joins 2.4 GHz networks only. Leave the password blank for an
                                     open network, or to keep the one already stored. Pick "Other network"
                                     from the list to type a hidden network's name.
                                 </div>
-                                <div id="wifi-result" class="text-sm" aria-live="polite"></div>
+                                <div id="wifi-result" class="status-text" aria-live="polite"></div>
                             </div>
                         </details>
 
-                        <div class="network-actions">
-                            <button type="button" id="forget-wifi" class="link-button" %FORGET_HIDDEN%>
-                                Forget this network
-                            </button>
-                            <span id="network-action-result" class="text-sm" aria-live="polite"></span>
+                        <div class="row" %FORGET_HIDDEN%>
+                            <div>
+                                <div class="row-name">Forget this network</div>
+                                <div class="row-note">
+                                    Clears the stored network and restarts into the setup hotspot.
+                                </div>
+                                <div id="network-action-result" class="status-text" aria-live="polite"></div>
+                            </div>
+                            <div class="row-control">
+                                <button type="button" id="forget-wifi" class="ghost danger">Forget</button>
+                            </div>
                         </div>
-                    </fieldset>
+                    </div>
 
                     <!--
                         Hidden on the setup hotspot: the credentials have to be
@@ -1223,105 +1412,162 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                         be reached from the hotspot to check them. A first setup
                         therefore ends with none stored, and the radar comes back
                         up holding on its "OpenSky key needed" screen until this
-                        section -- visible once it is on the owner's own network
-                        -- has been filled in. Hidden rather than removed, so its
+                        card -- visible once it is on the owner's own network --
+                        has been filled in. Hidden rather than removed, so its
                         two fields still submit and keep whatever is stored.
                     -->
-                    <fieldset class="config-section" %OPENSKY_HIDDEN%>
-                        <legend>OpenSky connection</legend>
-                        <p class="section-note">
-                            Where the aircraft come from, and required &mdash; the radar will not
-                            sweep without them. They are free: register an account at
-                            <a href="https://opensky-network.org"
-                               target="_blank" rel="noopener" class="underline">opensky-network.org</a>,
-                            sign in, then Register. Open
-                            <a href="https://opensky-network.org/my-opensky/account"
-                               target="_blank" rel="noopener" class="underline">Account &rarr; API client</a>
-                            and create a new API client.
-                        </p>
-                        <div class="credentials">
-                        <label class="field-row">
-                        <span>Client ID:</span>
-                        <input
-                            name="opensky-id"
-                            autocomplete="off"
-                            spellcheck="false"
-                            value='%OPENSKY_ID%'>
-                        </label>
+                    <div class="card" %OPENSKY_HIDDEN%>
+                        <h3 class="card-title">OpenSky &mdash; required, the radar will not sweep without it</h3>
 
-                        <label class="field-row">
-                        <span>Client secret:</span>
-                        <input
-                            name="opensky-secret"
-                            type="password"
-                            autocomplete="off"
-                            spellcheck="false"
-                            placeholder="%OPENSKY_SECRET_PLACEHOLDER%">
-                        </label>
-                        </div>
-                    </fieldset>
-                </div>
-
-                <div class="tab-panel" id="panel-advanced" data-panel="advanced"
-                     role="tabpanel" aria-labelledby="tab-advanced" hidden>
-
-                    <fieldset class="config-section">
-                        <legend>Firmware</legend>
-                        <p class="section-note">
-                            The radar checks for a new release once an hour. Installing takes about a
-                            minute and ends with a restart, so the display is unavailable while it runs.
-                        </p>
-                        <div class="display-option display-option-select">
-                            <label for="auto-update">When a new release is found</label>
-                            <select
-                                id="auto-update"
-                                name="auto-update"
-                                class="update-mode-select"
-                                aria-label="Firmware update behaviour">
-                                <option value="true" %AUTO_UPDATE_ON_SELECTED%>Install automatically</option>
-                                <option value="false" %AUTO_UPDATE_OFF_SELECTED%>Ask me first</option>
-                            </select>
+                        <div class="row stack">
+                            <div class="row-note">
+                                Free: register at
+                                <a href="https://opensky-network.org" target="_blank" rel="noopener">opensky-network.org</a>,
+                                sign in, then open
+                                <a href="https://opensky-network.org/my-opensky/account" target="_blank" rel="noopener">Account &rarr; API client</a>
+                                and create a new API client.
+                            </div>
                         </div>
 
-                        <div class="firmware-footer">
-                            <span class="firmware-version">Firmware %FIRMWARE_VERSION%</span>
-                            &middot; released %FIRMWARE_RELEASED%
-                            <p class="firmware-notes">%FIRMWARE_NOTES%</p>
-                            <p class="firmware-update">
-                                <button type="button" id="check-update" class="link-button">Check for updates now</button>
-                                <button type="button" id="install-update" class="link-button" hidden>Install now</button>
-                                <span id="update-status" aria-live="polite"></span>
-                            </p>
+                        <div class="row" data-terms="opensky client id credentials api">
+                            <div><div class="row-name">Client ID</div></div>
+                            <div class="row-control">
+                                <input
+                                    id="opensky-id"
+                                    name="opensky-id"
+                                    class="mono"
+                                    autocomplete="off"
+                                    spellcheck="false"
+                                    aria-label="OpenSky client ID"
+                                    value='%OPENSKY_ID%'>
+                            </div>
                         </div>
-                    </fieldset>
 
-                    <fieldset class="config-section">
-                        <legend>Panel alignment</legend>
-                        <p class="section-note">
-                            Leave at 0 unless you can see that the display sits crooked in its
-                            bezel. Anything other than 0 slows each frame down.
-                        </p>
-                        <label class="field-row">
-                        <span>Rotation trim (in &deg;):</span>
-                        <input
-                            name="screen-trim"
-                            type="number"
-                            min="%SCREEN_TRIM_MIN%"
-                            step="0.1"
-                            max="%SCREEN_TRIM_MAX%"
-                            value='%SCREEN_TRIM%'>
-                        </label>
+                        <div class="row" data-terms="opensky client secret credentials api">
+                            <div><div class="row-name">Client secret</div></div>
+                            <div class="row-control">
+                                <input
+                                    id="opensky-secret"
+                                    name="opensky-secret"
+                                    type="password"
+                                    autocomplete="off"
+                                    spellcheck="false"
+                                    aria-label="OpenSky client secret"
+                                    placeholder="%OPENSKY_SECRET_PLACEHOLDER%">
+                            </div>
+                        </div>
+                    </div>
 
-                        <div class="display-option">
-                            <label class="display-toggle" for="alignment-test">
-                                <span>Show alignment pattern instead of the radar</span>
-                                <input id="alignment-test" name="alignment-test" type="checkbox" %ALIGNMENT_TEST%>
+                    <div class="card">
+                        <h3 class="card-title">Place search</h3>
+                        <div class="row" data-terms="geocoder nominatim place search provider url endpoint">
+                            <label class="row-label" for="geocoder-url">
+                                <div class="row-name">Nominatim endpoint</div>
+                                <div class="row-note">
+                                    The service the place search on Location &amp; range asks. Change it
+                                    only to point at your own instance.
+                                </div>
                             </label>
+                            <div class="row-control">
+                                <input
+                                    id="geocoder-url"
+                                    name="geocoder-url"
+                                    class="mono"
+                                    value="%GEOCODER_URL%"
+                                    aria-label="Nominatim-compatible place search URL">
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- ============ FIRMWARE & PANEL ============ -->
+                <section class="group-panel" id="panel-device" data-group="device" hidden>
+                    <div class="group-head">
+                        <h2>Firmware &amp; panel</h2>
+                        <p>Updates, and the trim that squares the picture up in its bezel.</p>
+                    </div>
+
+                    <div class="card">
+                        <h3 class="card-title">Firmware</h3>
+
+                        <div class="row" data-terms="firmware version update release check install">
+                            <div>
+                                <div class="row-name mono">%FIRMWARE_VERSION%</div>
+                                <div class="row-note">
+                                    Released %FIRMWARE_RELEASED%. The radar checks for a new one once an
+                                    hour.<span id="update-status" aria-live="polite"></span>
+                                </div>
+                            </div>
+                            <div class="row-control">
+                                <button type="button" id="install-update" class="ghost" hidden>Install now</button>
+                                <button type="button" id="check-update" class="ghost">Check now</button>
+                            </div>
                         </div>
 
-                        <details class="mt-3 text-xs">
+                        <div class="row" data-terms="auto update automatic install ask">
+                            <label class="row-label" for="auto-update">
+                                <div class="row-name">When a new release is found</div>
+                                <div class="row-note">
+                                    Installing takes about a minute and ends with a restart, so the
+                                    display is unavailable while it runs.
+                                </div>
+                            </label>
+                            <div class="row-control">
+                                <select id="auto-update" name="auto-update" aria-label="Firmware update behaviour">
+                                    <option value="true" %AUTO_UPDATE_ON_SELECTED%>Install automatically</option>
+                                    <option value="false" %AUTO_UPDATE_OFF_SELECTED%>Ask me first</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <details class="help">
+                            <summary>Release notes</summary>
+                            <p>%FIRMWARE_NOTES%</p>
+                        </details>
+                    </div>
+
+                    <div class="card">
+                        <h3 class="card-title">Panel alignment</h3>
+
+                        <div class="row" data-terms="rotation trim tilt crooked bezel alignment degrees">
+                            <label class="row-label" for="screen-trim">
+                                <div class="row-name">Rotation trim</div>
+                                <div class="row-note">
+                                    Degrees. Leave at 0 unless the display sits crooked in its bezel.
+                                    Anything else slows each frame down.
+                                </div>
+                            </label>
+                            <div class="row-control">
+                                <input
+                                    id="screen-trim"
+                                    name="screen-trim"
+                                    class="mono"
+                                    type="number"
+                                    min="%SCREEN_TRIM_MIN%"
+                                    step="0.1"
+                                    max="%SCREEN_TRIM_MAX%"
+                                    aria-label="Rotation trim in degrees"
+                                    value='%SCREEN_TRIM%'>
+                            </div>
+                        </div>
+
+                        <div class="row" data-terms="alignment test pattern crosshair ring scale">
+                            <label class="row-label" for="alignment-test">
+                                <div class="row-name">Show alignment pattern</div>
+                                <div class="row-note">
+                                    A crosshair, an edge ring and a degree scale instead of the radar.
+                                    No aircraft are shown while this is on.
+                                </div>
+                            </label>
+                            <div class="row-control">
+                                <input id="alignment-test" name="alignment-test" class="switch" type="checkbox"
+                                       aria-label="Show alignment pattern" %ALIGNMENT_TEST%>
+                            </div>
+                        </div>
+
+                        <details class="help">
                             <summary>How to use these two</summary>
-                            <p class="mt-2">
+                            <p>
                                 The trim is for a display whose glass sits slightly crooked in its
                                 bezel, so the clock digits and text run a little downhill. It turns
                                 the whole picture by this many degrees: positive turns it clockwise,
@@ -1332,153 +1578,151 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                                 The alignment pattern puts a crosshair, a ring on the outermost
                                 pixels, and a degree scale on the display so you can measure the tilt
                                 against whatever the radar is mounted in. Set the trim, save, look,
-                                repeat &mdash; then clear the box. The radar shows no aircraft while
-                                it is ticked.
+                                repeat &mdash; then switch the pattern back off.
                             </p>
                         </details>
-                    </fieldset>
+                    </div>
+                </section>
 
-                    <fieldset class="config-section">
-                        <legend>Place search provider</legend>
-                        <p class="section-note">
-                            The Nominatim-compatible service the Radar tab's place search asks.
-                            Change it only to point at your own instance.
-                        </p>
-                        <input
-                            id="geocoder-url"
-                            name="geocoder-url"
-                            value="%GEOCODER_URL%"
-                            aria-label="Nominatim-compatible place search URL">
-                    </fieldset>
+                <!-- ============ THIS RADAR ============ -->
+                <section class="group-panel" id="panel-about" data-group="about" hidden>
+                    <div class="group-head">
+                        <h2>This radar</h2>
+                        <p>Status, reporting, and the two actions that restart it.</p>
+                    </div>
 
-                    <fieldset class="config-section">
-                        <legend>Remote diagnostics</legend>
-                        <p class="section-note">
-                            Off unless a key is entered below. When it is on, this radar sends crash
-                            reports and error messages to
-                            <a href="https://insights.espressif.com"
-                               target="_blank" rel="noopener" class="underline">ESP Insights</a>
-                            so whoever looks after it can see why it misbehaved without taking it
-                            apart. Along with those it reports free memory, uptime, Wi-Fi signal
-                            strength, and this network's name and IP address. It does not send your
-                            Wi-Fi password, your OpenSky credentials, or the location the radar is
-                            centred on. Clear the key to stop all of it.
-                        </p>
-                        <div class="credentials">
-                        <label class="field-row">
-                        <span>Insights auth key:</span>
-                        <input
-                            name="insights-key"
-                            type="password"
-                            autocomplete="off"
-                            spellcheck="false"
-                            placeholder="%INSIGHTS_KEY_PLACEHOLDER%">
-                        </label>
-
-                        <label class="field-row">
-                        <span>Label:</span>
-                        <input
-                            name="insights-label"
-                            autocomplete="off"
-                            maxlength="48"
-                            placeholder="e.g. kitchen shelf"
-                            value='%INSIGHTS_LABEL%'>
-                        </label>
-                        </div>
-                        <p class="section-note mt-3">
-                            The label is only there so this radar is recognisable on the dashboard,
-                            which otherwise lists it as %NET_MAC%.
-                        </p>
-
-                        <div class="display-option">
-                            <label class="display-toggle" for="insights-clear">
-                                <span>Turn reporting off and forget the key</span>
-                                <input id="insights-clear" name="insights-clear" type="checkbox">
-                            </label>
-                        </div>
-                        <p class="section-note mt-3">
-                            An empty key box means &ldquo;keep the stored key&rdquo;, so this box is how
-                            the key is actually removed. Takes effect on the restart that saving does.
-                        </p>
-                    </fieldset>
-
-                    <fieldset class="config-section">
-                        <legend>This radar</legend>
-                        <dl class="network-diagnostics">
-                            <dt>Address</dt><dd>%NET_IP%</dd>
-                            <dt>Signal</dt><dd>%NET_RSSI%</dd>
-                            <dt>MAC</dt><dd>%NET_MAC%</dd>
-                            <dt>Uptime</dt><dd>%NET_UPTIME%</dd>
-                            <dt>Free memory</dt><dd>%NET_HEAP%</dd>
+                    <div class="card">
+                        <h3 class="card-title">Status</h3>
+                        <dl class="stat-grid">
+                            <div><dt>Address</dt><dd>%NET_IP%</dd></div>
+                            <div><dt>Signal</dt><dd>%NET_RSSI%</dd></div>
+                            <div><dt>MAC</dt><dd>%NET_MAC%</dd></div>
+                            <div><dt>Uptime</dt><dd>%NET_UPTIME%</dd></div>
+                            <div><dt>Free memory</dt><dd>%NET_HEAP%</dd></div>
                         </dl>
-                        <div class="network-actions">
-                            <button type="button" id="restart-radar" class="link-button">Restart radar</button>
-                            <span id="restart-result" class="text-sm" aria-live="polite"></span>
-                        </div>
-                    </fieldset>
 
-                    <fieldset class="config-section danger-zone">
-                        <legend>Factory reset</legend>
-                        <p class="section-note">
-                            Erases every setting on this page &mdash; network, location, OpenSky
-                            credentials, display choices, panel trim and the diagnostics key
-                            &mdash; and restarts into the setup hotspot as if the radar had just
-                            been flashed. The installed firmware version is not affected. There is
-                            no undo.
-                        </p>
-                        <div class="display-option">
-                            <label class="display-toggle" for="factory-reset-confirm">
-                                <span>Yes, erase all settings on this radar</span>
-                                <input id="factory-reset-confirm" type="checkbox">
+                        <div class="row" data-terms="restart reboot">
+                            <div>
+                                <div class="row-name">Restart</div>
+                                <div class="row-note">Comes back in about a minute. Every setting is kept.</div>
+                                <div id="restart-result" class="status-text" aria-live="polite"></div>
+                            </div>
+                            <div class="row-control">
+                                <button type="button" id="restart-radar" class="ghost">Restart radar</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <h3 class="card-title">Remote diagnostics &mdash; off unless a key is set</h3>
+
+                        <div class="row stack">
+                            <div class="row-note">
+                                When it is on, this radar sends crash reports and error messages to
+                                <a href="https://insights.espressif.com" target="_blank" rel="noopener">ESP Insights</a>,
+                                along with free memory, uptime, Wi-Fi signal strength, and this
+                                network's name and IP address. It does not send your Wi-Fi password,
+                                your OpenSky credentials, or the location the radar is centred on.
+                            </div>
+                        </div>
+
+                        <div class="row" data-terms="insights diagnostics key telemetry crash reports">
+                            <div><div class="row-name">Insights auth key</div></div>
+                            <div class="row-control">
+                                <input
+                                    id="insights-key"
+                                    name="insights-key"
+                                    type="password"
+                                    autocomplete="off"
+                                    spellcheck="false"
+                                    aria-label="ESP Insights auth key"
+                                    placeholder="%INSIGHTS_KEY_PLACEHOLDER%">
+                            </div>
+                        </div>
+
+                        <div class="row" data-terms="insights label dashboard name">
+                            <label class="row-label" for="insights-label">
+                                <div class="row-name">Label</div>
+                                <div class="row-note">
+                                    So this radar is recognisable on the dashboard, which otherwise
+                                    lists it as %NET_MAC%.
+                                </div>
                             </label>
+                            <div class="row-control">
+                                <input
+                                    id="insights-label"
+                                    name="insights-label"
+                                    autocomplete="off"
+                                    maxlength="48"
+                                    aria-label="Insights label"
+                                    placeholder="e.g. kitchen shelf"
+                                    value='%INSIGHTS_LABEL%'>
+                            </div>
                         </div>
-                        <div class="danger-action">
-                            <button type="button" id="factory-reset" class="danger-button" disabled>
-                                Erase and restart
-                            </button>
-                            <span id="factory-reset-result" class="text-sm" aria-live="polite"></span>
+
+                        <div class="row" data-terms="insights clear forget key off">
+                            <label class="row-label" for="insights-clear">
+                                <div class="row-name">Turn reporting off and forget the key</div>
+                                <div class="row-note">
+                                    An empty key box means "keep the stored key", so this is how the key
+                                    is actually removed. Takes effect on the restart that saving does.
+                                </div>
+                            </label>
+                            <div class="row-control">
+                                <input id="insights-clear" name="insights-clear" class="switch" type="checkbox"
+                                       aria-label="Turn reporting off and forget the key">
+                            </div>
                         </div>
-                    </fieldset>
-                </div>
+                    </div>
 
-                <div class="save-row">
-                    <input
-                        type="submit"
-                        value="%SAVE_LABEL%"
-                        class="save-button">
+                    <div class="card danger">
+                        <h3 class="card-title">Factory reset</h3>
 
-                    <span id="save-state" class="save-state" aria-live="polite"></span>
-                    <div id="result" aria-live="polite"></div>
+                        <div class="row stack">
+                            <div class="row-note">
+                                Erases every setting on this page &mdash; network, location, OpenSky
+                                credentials, display choices, panel trim and the diagnostics key
+                                &mdash; and restarts into the setup hotspot as if the radar had just
+                                been flashed. The installed firmware version is not affected. There is
+                                no undo.
+                            </div>
+                        </div>
+
+                        <div class="row" data-terms="factory reset erase wipe">
+                            <label class="row-label" for="factory-reset-confirm">
+                                <div class="row-name">Yes, erase all settings on this radar</div>
+                                <div class="row-note">Tick to arm the button.</div>
+                                <div id="factory-reset-result" class="status-text" aria-live="polite"></div>
+                            </label>
+                            <div class="row-control">
+                                <input id="factory-reset-confirm" class="switch" type="checkbox"
+                                       aria-label="Confirm erasing all settings">
+                                <button type="button" id="factory-reset" class="ghost danger" disabled>Erase</button>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <p class="no-matches" id="no-matches" hidden>Nothing matches that search.</p>
+
+                <div class="save-row" id="save-row">
+                    <input type="submit" value="%SAVE_LABEL%" class="save-button">
+                    <span id="save-state" class="save-state" aria-live="polite">No changes yet</span>
+                    <span id="result" aria-live="polite"></span>
+                    <span class="save-note">Save applies every group at once</span>
                 </div>
             </form>
 
             <div class="project-footer">
-                <span class="firmware-version">Firmware %FIRMWARE_VERSION%</span>
-                &middot;
-                <a href="https://github.com/thedontknowguy/micro-radar" target="_blank" rel="noopener"
-                   class="underline">Micro Radar on GitHub</a>
-                <p class="project-credit">
-                    A fork of the original
-                    <a href="https://github.com/AnthonySturdy/micro-radar" target="_blank" rel="noopener"
-                       class="underline">Micro Radar</a>
-                    by Anthony Sturdy. Full credit to Anthony for the original project, firmware,
-                    enclosure, and design.
-                </p>
+                <a href="https://github.com/thedontknowguy/micro-radar" target="_blank" rel="noopener">Micro Radar on GitHub</a>
+                &middot; a fork of the original
+                <a href="https://github.com/AnthonySturdy/micro-radar" target="_blank" rel="noopener">Micro Radar</a>
+                by Anthony Sturdy. Full credit to Anthony for the original project, firmware,
+                enclosure, and design.
             </div>
-        </fieldset>
 
-        <!--
-            The mark the panel itself shows at boot, so the page someone opens
-            next is recognisably the same device. A sibling of the panel rather
-            than a child of it: it is positioned against the shell, and coming
-            after the panel in source order is what puts it on top of the border
-            it is there to sit on. Served from /logo.png rather than inlined --
-            it is the one asset here worth caching, and it would otherwise be
-            re-sent with every reload. Decorative, so the alt text is empty:
-            the legend on the opposite corner already names the page.
-        -->
-        <img class="masthead-mark" src="/logo.png" width="88" height="88"
-             alt="" aria-hidden="true">
+            </div>
+        </div>
       </div>
 
         <script>
@@ -1486,39 +1730,120 @@ static const char CONFIG_HTML[] PROGMEM = R"(
             // hotspot, so nothing on the far side of the internet is reachable.
             const setupMode = document.body.dataset.netMode === 'setup';
 
-            const tabButtons = Array.from(document.querySelectorAll('.tab-button'));
-            const tabPanels = Array.from(document.querySelectorAll('.tab-panel'));
+            const navButtons = Array.from(document.querySelectorAll('.nav'));
+            const groupPanels = Array.from(document.querySelectorAll('.group-panel'));
 
-            function showTab(name) {
-                tabPanels.forEach(function(panel) {
-                    panel.hidden = panel.dataset.panel !== name;
+            function showGroup(name) {
+                groupPanels.forEach(function(panel) {
+                    panel.hidden = panel.dataset.group !== name;
                 });
-                tabButtons.forEach(function(button) {
-                    button.setAttribute(
-                        'aria-selected',
-                        button.dataset.tab === name ? 'true' : 'false'
-                    );
+                navButtons.forEach(function(button) {
+                    if (button.dataset.group === name)
+                        button.setAttribute('aria-current', 'true');
+                    else
+                        button.removeAttribute('aria-current');
                 });
             }
 
-            tabButtons.forEach(function(button) {
+            function currentGroup() {
+                const shown = groupPanels.find(function(panel) { return !panel.hidden; });
+                return shown ? shown.dataset.group : 'location';
+            }
+
+            navButtons.forEach(function(button) {
                 button.addEventListener('click', function() {
-                    showTab(button.dataset.tab);
-                    // Replaced rather than pushed: the tabs are one page, and
+                    clearSearch();
+                    showGroup(button.dataset.group);
+                    // Replaced rather than pushed: the groups are one page, and
                     // filling the history with them turns Back into a way of
                     // walking sideways instead of leaving.
-                    history.replaceState(null, '', '#' + button.dataset.tab);
+                    history.replaceState(null, '', '#' + button.dataset.group);
                 });
             });
 
             // On the hotspot there is nothing to choose between: the network is
             // the only thing worth setting before the radar can reach anything.
-            const requestedTab = location.hash.replace('#', '');
-            showTab(
+            const requestedGroup = location.hash.replace('#', '');
+            showGroup(
                 setupMode
-                    ? 'setup'
-                    : (tabButtons.some(b => b.dataset.tab === requestedTab) ? requestedTab : 'radar')
+                    ? 'connection'
+                    : (navButtons.some(b => b.dataset.group === requestedGroup) ? requestedGroup : 'location')
             );
+
+            // Filtering never removes a row from the document, only hides it:
+            // /save reads every checkbox as "present means on", so a row taken
+            // out would submit as a switched-off setting. Searching shows every
+            // group at once, which is the point -- the reason to type is not
+            // knowing which group a setting is in.
+            const searchBox = document.getElementById('setting-search');
+            const searchableRows = Array.from(
+                document.querySelectorAll('.row[data-terms], .network-details > summary[data-terms]')
+            );
+            const noMatches = document.getElementById('no-matches');
+
+            function rowHaystack(row) {
+                if (!row.dataset.haystack) {
+                    row.dataset.haystack =
+                        (row.textContent + ' ' + row.dataset.terms).toLocaleLowerCase();
+                }
+                return row.dataset.haystack;
+            }
+
+            function clearSearch() {
+                if (!searchBox || !searchBox.value)
+                    return;
+                searchBox.value = '';
+                applySearch();
+            }
+
+            function applySearch() {
+                const query = searchBox.value.trim().toLocaleLowerCase();
+
+                if (!query) {
+                    searchableRows.forEach(function(row) { row.hidden = false; });
+                    document.querySelectorAll('.card, .group-head').forEach(function(el) {
+                        el.hidden = false;
+                    });
+                    noMatches.hidden = true;
+                    showGroup(currentGroup());
+                    return;
+                }
+
+                searchableRows.forEach(function(row) {
+                    row.hidden = rowHaystack(row).indexOf(query) === -1;
+                });
+
+                // A card whose every searchable row is hidden has nothing left
+                // to show but its own title, and a group with no visible card
+                // is just a heading.
+                groupPanels.forEach(function(panel) {
+                    let panelHit = false;
+                    panel.querySelectorAll('.card').forEach(function(card) {
+                        const rows = card.querySelectorAll('[data-terms]');
+                        const hit = rows.length === 0
+                            ? false
+                            : Array.from(rows).some(function(row) { return !row.hidden; });
+                        card.hidden = !hit;
+                        panelHit = panelHit || hit;
+                    });
+                    panel.hidden = !panelHit;
+                    const head = panel.querySelector('.group-head');
+                    if (head)
+                        head.hidden = !panelHit;
+                });
+
+                noMatches.hidden = groupPanels.some(function(panel) { return !panel.hidden; });
+            }
+
+            if (searchBox) {
+                searchBox.addEventListener('input', applySearch);
+                searchBox.addEventListener('keydown', function(event) {
+                    if (event.key === 'Escape') {
+                        searchBox.value = '';
+                        applySearch();
+                    }
+                });
+            }
 
             const locationButton = document.getElementById('use-location');
             const locationResult = document.getElementById('location-result');
@@ -1531,24 +1856,25 @@ static const char CONFIG_HTML[] PROGMEM = R"(
             let lastPlaceSearchAt = 0;
             const maxLocationNameLength = 18;
 
-            function bindDependentSelect(toggleId, selectId) {
+            // The select only applies while its toggle is on, so it follows it
+            // rather than sitting there looking editable.
+            function bindDependentSelect(toggleId, selectId, rowId) {
                 const toggle = document.getElementById(toggleId);
                 const select = document.getElementById(selectId);
-                const row = select.closest('.display-option');
+                const row = document.getElementById(rowId);
 
                 function syncSelectState() {
                     select.disabled = !toggle.checked;
-                    row.classList.toggle('is-disabled', !toggle.checked);
+                    row.classList.toggle('is-off', !toggle.checked);
                 }
 
                 toggle.addEventListener('change', syncSelectState);
                 syncSelectState();
             }
 
-            bindDependentSelect('scanline', 'sweep-period');
-            bindDependentSelect('speed', 'speed-unit');
-            bindDependentSelect('altitude', 'altitude-unit');
-
+            bindDependentSelect('scanline', 'sweep-period', 'row-sweep-period');
+            bindDependentSelect('speed', 'speed-unit', 'row-speed-unit');
+            bindDependentSelect('altitude', 'altitude-unit', 'row-altitude-unit');
             // The radar stores its coverage as a half-width in degrees, because
             // that is what the projection divides by. Degrees are not a distance
             // anyone can picture, so the field people actually touch is a slider
@@ -1623,11 +1949,22 @@ static const char CONFIG_HTML[] PROGMEM = R"(
 
             showRadius();
 
+            // Writing a value from script fires none of the events the change
+            // counter listens for, so each field it fills is reported by hand.
             function fillLocation(latitude, longitude, message, suggestedName) {
-                document.getElementById('latitude').value = Number(latitude).toFixed(6);
-                document.getElementById('longitude').value = Number(longitude).toFixed(6);
-                if (typeof suggestedName === 'string' && suggestedName.trim())
+                const latitudeField = document.getElementById('latitude');
+                const longitudeField = document.getElementById('longitude');
+
+                latitudeField.value = Number(latitude).toFixed(6);
+                longitudeField.value = Number(longitude).toFixed(6);
+                markChanged(latitudeField);
+                markChanged(longitudeField);
+
+                if (typeof suggestedName === 'string' && suggestedName.trim()) {
                     locationNameInput.value = compactLocationName(suggestedName);
+                    markChanged(locationNameInput);
+                }
+
                 locationResult.textContent = message + ' Press Save to apply.';
             }
 
@@ -2152,18 +2489,70 @@ static const char CONFIG_HTML[] PROGMEM = R"(
             }
 
             const configForm = document.getElementById('cfg');
+            const saveRow = document.getElementById('save-row');
             const saveState = document.getElementById('save-state');
+            const resultBox = document.getElementById('result');
 
-            // One Save covers all three tabs, so a change made on a tab that is
-            // no longer showing is easy to forget about. This is the only thing
-            // on the page that says the form has been touched at all.
-            function markDirty() {
-                saveState.textContent = 'Unsaved changes on this page';
-                saveState.classList.add('is-dirty');
+            // One Save covers every group, so a change made in a group that is
+            // no longer showing is easy to forget about. Counting them per
+            // group and badging the rail is what keeps it visible from wherever
+            // the next change is made.
+            const touched = new Map();
+
+            // Controls that are not settings: the tick that only arms the
+            // erase button, the two place-search boxes, and the coverage
+            // slider and its degrees box -- those two write the hidden radius
+            // field, which is counted for them, and would otherwise make one
+            // drag read as two changes.
+            const notASetting = new Set([
+                'factory-reset-confirm',
+                'place-query',
+                'place-results',
+                'radius-range',
+                'radius-degrees'
+            ]);
+
+            function updateChangeCounts() {
+                let total = 0;
+
+                navButtons.forEach(function(button) {
+                    const changed = touched.get(button.dataset.group);
+                    const count = changed ? changed.size : 0;
+                    total += count;
+                    button.classList.toggle('has-changes', count > 0);
+                    button.querySelector('.nav-count').textContent = String(count);
+                });
+
+                saveRow.classList.toggle('is-dirty', total > 0);
+                saveState.textContent = total === 0
+                    ? 'No changes yet'
+                    : total + (total === 1 ? ' unsaved change' : ' unsaved changes');
             }
 
-            configForm.addEventListener('input', markDirty);
-            configForm.addEventListener('change', markDirty);
+            function markChanged(field) {
+                const key = field.name || field.id;
+                const panel = field.closest('.group-panel');
+                if (!key || !panel || notASetting.has(field.id))
+                    return;
+
+                if (!touched.has(panel.dataset.group))
+                    touched.set(panel.dataset.group, new Set());
+                touched.get(panel.dataset.group).add(key);
+
+                resultBox.textContent = '';
+                updateChangeCounts();
+            }
+
+            configForm.addEventListener('input', function(e) { markChanged(e.target); });
+            configForm.addEventListener('change', function(e) { markChanged(e.target); });
+
+            // Dragging the slider writes the stored degrees rather than
+            // carrying a name of its own, so the hidden field it feeds has to
+            // be counted for it.
+            radiusRange.addEventListener('input', function() { markChanged(radiusField); });
+            radiusDegrees.addEventListener('change', function() { markChanged(radiusField); });
+
+            updateChangeCounts();
 
             // A number outside its min/max stops submission before the submit
             // event ever fires, and the browser cannot focus a field inside a
@@ -2171,9 +2560,10 @@ static const char CONFIG_HTML[] PROGMEM = R"(
             // nothing about why. Capture, because this has to run before the
             // browser gives up trying to focus it.
             configForm.addEventListener('invalid', function(e) {
-                const panel = e.target.closest('.tab-panel');
+                clearSearch();
+                const panel = e.target.closest('.group-panel');
                 if (panel && panel.hidden)
-                    showTab(panel.dataset.panel);
+                    showGroup(panel.dataset.group);
             }, true);
 
             configForm.addEventListener('submit', function(e) {
@@ -2186,7 +2576,8 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                     ? manualSsid.value.trim()
                     : ssidSelect.value;
                 if (setupMode && !chosenSsid) {
-                    showTab('setup');
+                    clearSearch();
+                    showGroup('connection');
                     networkDetails.open = true;
                     wifiResult.textContent = 'Choose a network, or type its name, before saving.';
                     return;
@@ -2195,9 +2586,10 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                 fetch(this.action, { method: 'POST', body: new FormData(this) })
                     .then(r => r.text())
                     .then(function(html) {
-                        document.getElementById('result').innerHTML = html;
-                        saveState.textContent = '';
-                        saveState.classList.remove('is-dirty');
+                        resultBox.innerHTML = html;
+                        touched.clear();
+                        updateChangeCounts();
+                        saveState.textContent = 'Saved';
                     });
             });
         </script>
@@ -2383,21 +2775,25 @@ void ConfigurationWebServer::Initialise(FirmwareUpdater& updater, Mode serveMode
         values.wifiSsid = EscapeHtmlAttribute(storedSsid);
         values.setupMode = setupMode ? "setup" : "station";
         values.networkOpen = setupMode ? "open" : "";
-        values.networkSummary = "Network settings";
         values.forgetHidden = setupMode ? "hidden" : "";
         values.saveLabel = setupMode ? "Save and connect" : "Save";
-        values.tabsHidden = setupMode ? "hidden" : "";
+        values.navHidden = setupMode ? "hidden" : "";
         values.openskyHidden = setupMode ? "hidden" : "";
         values.wifiPassPlaceholder = setupMode
             ? "Network password"
             : "Leave blank to keep the stored password";
+        // The summary is the row someone reads before deciding to open the
+        // picker, so it carries the network's name; the note underneath says
+        // what opening it is for.
+        values.networkSummary = setupMode
+            ? String("Choose your network")
+            : (storedSsid.length() ? EscapeHtmlAttribute(storedSsid) : String("No network stored"));
         values.networkNote = setupMode
-            ? "The radar is serving this page from its own hotspot. Pick your network below "
-              "and set everything else on this page at the same time -- saving joins the "
-              "network and starts the radar."
+            ? "The radar is serving this page from its own hotspot. Saving joins the network "
+              "and starts the radar; everything else can be set once it is on."
             : (storedSsid.length()
-                ? "Connected to " + EscapeHtmlAttribute(storedSsid) + "."
-                : String("Connected."));
+                ? "Connected. Open this to move the radar to a different network."
+                : String("Open this to choose one."));
 
         // Stands in for the separate info page the old Wi-Fi portal had.
         values.netIp = setupMode
@@ -2408,13 +2804,20 @@ void ConfigurationWebServer::Initialise(FirmwareUpdater& updater, Mode serveMode
         values.netUptime = FormatUptime(millis());
         values.netHeap = String(ESP.getFreeHeap() / 1024) + " KB free";
 
+        // The one line of state the header carries on every group.
+        values.netStatus = setupMode
+            ? String("Setup hotspot")
+            : (storedSsid.length()
+                ? EscapeHtmlAttribute(storedSsid) + " &middot; " + values.netRssi
+                : String("Connected"));
+
         // template processor called once per %PLACEHOLDER% token found in CONFIG_HTML.
         AsyncWebServerResponse* response = request->beginResponse(
             200, "text/html",
             (const uint8_t*)CONFIG_HTML, sizeof(CONFIG_HTML) - 1,
             [values](const String& var) -> String {
                 if (var == "NET_MODE")       return values.setupMode;
-                if (var == "TABS_HIDDEN")    return values.tabsHidden;
+                if (var == "NAV_HIDDEN")     return values.navHidden;
                 if (var == "OPENSKY_HIDDEN") return values.openskyHidden;
                 if (var == "NETWORK_NOTE")   return values.networkNote;
                 if (var == "NETWORK_OPEN")   return values.networkOpen;
@@ -2428,6 +2831,7 @@ void ConfigurationWebServer::Initialise(FirmwareUpdater& updater, Mode serveMode
                 if (var == "NET_MAC")        return values.netMac;
                 if (var == "NET_UPTIME")     return values.netUptime;
                 if (var == "NET_HEAP")       return values.netHeap;
+                if (var == "NET_STATUS")     return values.netStatus;
 
                 if (var == "LATITUDE")       return values.latitude;
                 if (var == "LONGITUDE")      return values.longitude;
