@@ -296,6 +296,8 @@ void loop()
     return;
   }
 
+  WiFiConnection::Maintain();
+
   // Below the update check and above the alignment return, and both halves of
   // that matter.
   //

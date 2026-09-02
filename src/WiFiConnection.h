@@ -32,6 +32,11 @@ constexpr unsigned long JoinTimeoutMs = 20000;
 // nothing to join.
 void BeginJoin(ConfigurationWebServer& configServer);
 
+// Keeps an established station connection usable after the router or the
+// station-side DHCP/DNS state has failed. Call from the main loop; checks and
+// recovery attempts are rate limited internally.
+void Maintain();
+
 // Whether the join is still worth waiting on: credentials were found and the
 // driver has not associated yet. False with nothing stored, since no amount of
 // waiting turns that into a network. Cheap enough to poll every few

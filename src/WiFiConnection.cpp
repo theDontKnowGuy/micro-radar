@@ -5,6 +5,7 @@
 #include <esp_wifi.h>
 
 #include "ConfigurationWebServer.h"
+#include "Diagnostics.h"
 #include "FirmwareUpdater.h"
 #include "ui/StatusScreen.h"
 #include "ui/WifiSetupQr.h"
@@ -20,6 +21,44 @@ namespace {
 // outlive the call that reads them.
 String storedSsid;
 String storedPassword;
+unsigned long lastHealthCheck = 0;
+unsigned long lastReconnectAttempt = 0;
+unsigned int dnsFailures = 0;
+
+constexpr unsigned long HEALTH_CHECK_INTERVAL_MS = 30000;
+constexpr unsigned long RECONNECT_INTERVAL_MS = 10000;
+constexpr unsigned int DNS_FAILURES_BEFORE_RESTART = 3;
+
+void RestartStationStack()
+{
+  Serial.println("Wi-Fi stack is wedged - restarting station interface");
+  Diagnostics::Event("wifi", "station stack wedged; restarting STA interface");
+
+  wifi_config_t config = {};
+  if (esp_wifi_get_config(WIFI_IF_STA, &config) == ESP_OK && config.sta.ssid[0] != '\0') {
+    const String ssid = reinterpret_cast<const char*>(config.sta.ssid);
+    const String password = reinterpret_cast<const char*>(config.sta.password);
+
+    WiFi.disconnect(true);
+    delay(100);
+    WiFi.mode(WIFI_OFF);
+    delay(100);
+    WiFi.mode(WIFI_STA);
+    WiFi.setAutoReconnect(true);
+    WiFi.setSleep(false);
+    WiFi.begin(ssid.c_str(), password.c_str());
+    return;
+  }
+
+  WiFi.disconnect(true);
+  delay(100);
+  WiFi.mode(WIFI_OFF);
+  delay(100);
+  WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
+  WiFi.setSleep(false);
+  WiFi.begin();
+}
 
 void SecureWipe(void* data, size_t length)
 {
@@ -93,6 +132,46 @@ void BeginJoin(ConfigurationWebServer& configServer)
   WiFi.begin(storedSsid.c_str(), storedPassword.c_str());
 }
 
+void Maintain()
+{
+  const unsigned long now = millis();
+
+  if (WiFi.status() != WL_CONNECTED) {
+    dnsFailures = 0;
+    if (now - lastReconnectAttempt >= RECONNECT_INTERVAL_MS) {
+      lastReconnectAttempt = now;
+      Serial.println("Wi-Fi disconnected - attempting reconnect");
+      Diagnostics::Event("wifi", "station disconnected; reconnecting");
+      WiFi.reconnect();
+    }
+    return;
+  }
+
+  if (now - lastHealthCheck < HEALTH_CHECK_INTERVAL_MS)
+    return;
+  lastHealthCheck = now;
+
+  // A station that stays associated but cannot resolve names or answer on the
+  // LAN is not just a DNS problem: the driver itself is wedged. Check for a
+  // basic DNS resolution first and then force a full station reinitialization
+  // if the link is still unhealthy.
+  IPAddress resolvedAddress;
+  if (WiFi.hostByName("pool.ntp.org", resolvedAddress) == 1) {
+    dnsFailures = 0;
+    return;
+  }
+
+  ++dnsFailures;
+  Serial.printf("Wi-Fi health check failed (%u/%u)\n",
+                dnsFailures, DNS_FAILURES_BEFORE_RESTART);
+  if (dnsFailures < DNS_FAILURES_BEFORE_RESTART)
+    return;
+
+  dnsFailures = 0;
+  lastReconnectAttempt = now;
+  RestartStationStack();
+}
+
 bool JoinPending()
 {
   return !storedSsid.isEmpty() && WiFi.status() != WL_CONNECTED;
@@ -122,6 +201,9 @@ bool FinishJoin()
   SecureWipe(const_cast<char*>(storedPassword.c_str()), storedPassword.length());
   storedSsid = String();
   storedPassword = String();
+  lastHealthCheck = millis();
+  lastReconnectAttempt = millis();
+  dnsFailures = 0;
 
   return connected;
 }
