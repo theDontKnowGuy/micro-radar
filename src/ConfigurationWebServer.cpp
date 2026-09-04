@@ -1202,6 +1202,21 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                     </div>
 
                     <div class="card">
+                        <h3 class="card-title">Local time</h3>
+
+                        <div class="row" data-terms="clock time local">
+                            <label class="row-label" for="clock">
+                                <div class="row-name">Show local time</div>
+                                <div class="row-note">A clock in the centre of the scope.</div>
+                            </label>
+                            <div class="row-control">
+                                <input id="clock" name="clock" class="switch" type="checkbox"
+                                       aria-label="Show local time" %CLOCK%>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="card">
                         <h3 class="card-title">Sweep</h3>
 
                         <div class="row" data-terms="sweep scanline animation trace">
@@ -1242,17 +1257,6 @@ static const char CONFIG_HTML[] PROGMEM = R"(
 
                     <div class="card">
                         <h3 class="card-title">On the face</h3>
-
-                        <div class="row" data-terms="clock time local">
-                            <label class="row-label" for="clock">
-                                <div class="row-name">Local time</div>
-                                <div class="row-note">A clock in the centre of the scope.</div>
-                            </label>
-                            <div class="row-control">
-                                <input id="clock" name="clock" class="switch" type="checkbox"
-                                       aria-label="Show local time" %CLOCK%>
-                            </div>
-                        </div>
 
                         <div class="row" data-terms="ground traffic taxiing parked">
                             <label class="row-label" for="ground-traffic">

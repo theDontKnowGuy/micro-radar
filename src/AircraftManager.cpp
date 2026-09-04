@@ -704,8 +704,8 @@ void AircraftManager::RunAircraftFetch()
 
             const char* callsign = aircraft.callsign.isEmpty() ? "----" : aircraft.callsign.c_str();
             const char* status = groundHidden ? "ground, hidden" : (inRange ? "in range" : "outside display");
-            Serial.printf("[INFO]   %s %-8s %s\n",
-                          IcaoDisplayLabel(aircraft.icao24).c_str(), callsign, status);
+            // Serial.printf("[INFO]   %s %-8s %s\n",
+            //               IcaoDisplayLabel(aircraft.icao24).c_str(), callsign, status);
         }
         Serial.printf("[INFO] OpenSky returned %u aircraft, %u within the round display\n",
                       static_cast<unsigned>(fetchedAircraft.size()),

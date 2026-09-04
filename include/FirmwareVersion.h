@@ -22,8 +22,8 @@
 //
 // Keep the date as YYYY-MM-DD and the notes to a sentence -- the notes are
 // rendered on a phone-width page.
-#define FIRMWARE_RELEASED "2026-08-29"
-#define FIRMWARE_NOTES "New confiuguration page"
+#define FIRMWARE_RELEASED "2026-09-04"
+#define FIRMWARE_NOTES "Improve memory management in stressful conditions"
 
 // Identifies which hardware build this binary is for. Set per environment in
 // platformio.ini and used as the key into the manifest's "builds" object, so a
