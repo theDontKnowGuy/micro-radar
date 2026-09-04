@@ -27,7 +27,6 @@
 #include <esp_insights.h>
 #include <esp_rmaker_work_queue.h>
 
-extern "C" esp_insights_transport_config_t g_default_insights_transport_https;
 #endif
 
 namespace {
@@ -108,6 +107,7 @@ std::atomic<bool> firstSendPending{false};
 // waiting on it in the meantime -- and the alternative to waiting is the
 // use-after-free this exists to prevent.
 SemaphoreHandle_t storeMutex = nullptr;
+
 
 // A burst is this many transport errors inside this window. Chosen against an
 // observed failure: a rejected key produced errors roughly five times a second,
@@ -219,35 +219,6 @@ uint32_t RecordBoot()
 }
 
 #ifdef CONFIG_ESP_INSIGHTS_ENABLED
-esp_err_t InsightsTransportInit(void* userdata)
-{
-    const auto callback = g_default_insights_transport_https.callbacks.init;
-    return callback != nullptr ? callback(userdata) : ESP_OK;
-}
-
-void InsightsTransportDeinit()
-{
-    const auto callback = g_default_insights_transport_https.callbacks.deinit;
-    if (callback != nullptr)
-        callback();
-}
-
-int InsightsTransportDataSend(void* data, size_t length)
-{
-    NetworkTls::Guard tlsGuard;
-    constexpr const char* endpoint = "https://client.insights.espressif.com";
-    NetworkTls::LogHeap("Before request", "POST", endpoint);
-
-    const auto callback = g_default_insights_transport_https.callbacks.data_send;
-    const int result = callback != nullptr ? callback(data, length) : -1;
-
-    // The bundled transport owns its client handle; this is after its
-    // synchronous transfer, without claiming that its reusable handle was
-    // destroyed here.
-    NetworkTls::LogHeap("After request", "POST", endpoint);
-    return result;
-}
-
 // Shuts the agent down without pulling the rug out from under its own task.
 //
 // esp_insights_deinit() tears down in the wrong order for an agent that is
@@ -287,6 +258,8 @@ void StopAgent()
     if (storeMutex != nullptr)
         xSemaphoreTake(storeMutex, portMAX_DELAY);
 
+    // OTA has already parked the display, so it is safe to wait for the
+    // worker before releasing the Insights buffers.
     esp_rmaker_work_queue_deinit();
     Insights.end();
     started = false;
@@ -326,21 +299,8 @@ bool StartAgent()
     // without anyone having to keep a list. The human label is attached below
     // as a variable instead -- two friends both typing "living room" would
     // otherwise merge into one device on the dashboard.
-    // Keep Espressif's HTTPS implementation and endpoint, but interpose on its
-    // synchronous send callback so it takes the same TLS admission mutex as
-    // OpenSky, weather, destination and OTA calls.
-    esp_insights_transport_config_t transport = {};
-    transport.callbacks.init = InsightsTransportInit;
-    transport.callbacks.deinit = InsightsTransportDeinit;
-    transport.callbacks.data_send = InsightsTransportDataSend;
-    transport.userdata = const_cast<char*>(storedAuthKey.c_str());
-    if (esp_insights_transport_register(&transport) != ESP_OK)
+    if (!Insights.begin(storedAuthKey.c_str(), nullptr, 0xFFFFFFFF, useExternalRam))
         return false;
-
-    if (!Insights.begin(storedAuthKey.c_str(), nullptr, 0xFFFFFFFF, useExternalRam, false)) {
-        esp_insights_transport_unregister();
-        return false;
-    }
 
     started = true;
     nodeId = Insights.nodeID();
@@ -470,8 +430,8 @@ void Poll()
 
     // Keep the storm circuit breaker, but do not repeatedly tear down and
     // reconstruct the agent. A bad key or unreachable endpoint stays disabled
-    // until reboot/settings change; ordinary successful uploads are serialized
-    // with application TLS by InsightsTransportDataSend().
+    // until reboot/settings change. Application HTTPS calls remain serialized
+    // with one another by NetworkTls.
     Serial.println("Diagnostics: transport failing repeatedly - disabling until reboot");
     StopAgent();
 #endif
