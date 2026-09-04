@@ -4,9 +4,8 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
-// One admission gate for every outbound TLS session in the firmware. The
-// application clients take it directly; Diagnostics wraps the ESP Insights
-// HTTPS transport's synchronous data_send callback with the same guard.
+// One admission gate for application-owned outbound TLS sessions in the
+// firmware. ESP Insights uses its own internal worker and transport.
 namespace NetworkTls {
 
 // Create the statically backed mutex before any component can start a

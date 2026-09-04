@@ -2,6 +2,7 @@
 
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
+#include <cstring>
 
 #include "NetworkTls.h"
 
@@ -59,7 +60,11 @@ String HttpRequestManager::BuildQueryString(const std::vector<std::pair<String, 
 }
 
 HttpResult HttpRequestManager::Get(const String& url, const std::vector<std::pair<String, String>>& params, const std::vector<std::pair<String, String>>& headers) {
-    HttpResult result{ false, 0, "", "" };
+    return GetImpl(url, params, headers);
+}
+
+HttpResult HttpRequestManager::GetImpl(const String& url, const std::vector<std::pair<String, String>>& params, const std::vector<std::pair<String, String>>& headers) {
+    HttpResult result{ false, 0, -1, "", "" };
 
     const String queryParams = BuildQueryString(params);
     const String fullUrl = url + queryParams;
@@ -71,6 +76,10 @@ HttpResult HttpRequestManager::Get(const String& url, const std::vector<std::pai
     client.setInsecure();
 
     HTTPClient http;
+    // OpenSky answers HTTP/1.1 requests with chunked transfer encoding. Use
+    // HTTP/1.0 so the response is close-delimited and bypasses the framework's
+    // chunked-body reader, which has produced corrupted JSON on this device.
+    http.useHTTP10(true);
     http.setReuse(false);
     http.setTimeout(HTTP_TIMEOUT_MS);
     http.setConnectTimeout(HTTP_TIMEOUT_MS);
@@ -89,10 +98,17 @@ HttpResult HttpRequestManager::Get(const String& url, const std::vector<std::pai
     int responseCode = http.GET();
     NetworkTls::LogHeap("After request", "GET", fullUrl.c_str());
     result.statusCode = responseCode;
+    result.contentLength = http.getSize();
 
     if (responseCode > 0) {
         result.success = true;
         result.response = http.getString();
+        if (result.contentLength >= 0 &&
+            static_cast<size_t>(result.contentLength) != result.response.length()) {
+            Serial.printf("[WARN] GET response truncated: declared %d, received %u\n",
+                          result.contentLength,
+                          static_cast<unsigned int>(result.response.length()));
+        }
         NetworkTls::LogHeap("After response", "GET", fullUrl.c_str());
     }
     else {
@@ -112,13 +128,19 @@ HttpResult HttpRequestManager::Get(const String& url, const std::vector<std::pai
 
 HttpResult HttpRequestManager::Post(const String& url, const String& body, const std::vector<std::pair<String, String>>& headers)
 {
-    HttpResult result{ false, 0, "", "" };
+    return PostImpl(url, body, headers);
+}
+
+HttpResult HttpRequestManager::PostImpl(const String& url, const String& body, const std::vector<std::pair<String, String>>& headers)
+{
+    HttpResult result{ false, 0, -1, "", "" };
 
     NetworkTls::Guard tlsGuard;
     WiFiClientSecure client;
     client.setInsecure();
 
     HTTPClient http;
+    http.useHTTP10(true);
     http.setReuse(false);
     http.setTimeout(HTTP_TIMEOUT_MS);
     http.setConnectTimeout(HTTP_TIMEOUT_MS);
@@ -137,6 +159,7 @@ HttpResult HttpRequestManager::Post(const String& url, const String& body, const
     int responseCode = http.POST(body);
     NetworkTls::LogHeap("After request", "POST", url.c_str());
     result.statusCode = responseCode;
+    result.contentLength = http.getSize();
 
     if (responseCode > 0) {
         result.success = true;

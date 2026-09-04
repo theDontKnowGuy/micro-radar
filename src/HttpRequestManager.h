@@ -6,6 +6,7 @@
 struct HttpResult {
     bool success;           // Whether the request succeeded
     int statusCode;         // HTTP status code (0 if network error)
+    int contentLength;      // Declared response length (-1 if unknown)
     String response;        // Response body (empty on error)
     String errorMessage;    // Error description if success == false
 };
@@ -14,6 +15,10 @@ class HttpRequestManager
 {
 private:
     String BuildQueryString(const std::vector<std::pair<String, String>>& params) const;
+    HttpResult GetImpl(const String& url, const std::vector<std::pair<String, String>>& params,
+                       const std::vector<std::pair<String, String>>& headers);
+    HttpResult PostImpl(const String& url, const String& body,
+                        const std::vector<std::pair<String, String>>& headers);
 
 public:
     HttpRequestManager() = default;

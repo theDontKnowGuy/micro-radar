@@ -674,6 +674,7 @@ void AircraftManager::RunAircraftFetch()
         }
     } else {
         JsonDocument doc;
+        NetworkTls::LogHeap("Before OpenSky parse", "FETCH", "OpenSky response");
         const DeserializationError error = deserializeJson(doc, result.response);
         if (!error && doc["states"].is<JsonArray>()) {
             fetchedAircraft = JsonParser::ParseArray<Aircraft>(doc["states"]);
@@ -687,8 +688,18 @@ void AircraftManager::RunAircraftFetch()
             Serial.printf("[WARN] OpenSky HTTP %d response length %u, body: ",
                           result.statusCode,
                           static_cast<unsigned int>(result.response.length()));
+            Serial.printf("(declared %d) ",
+                          result.contentLength);
             const size_t previewLength = std::min<size_t>(result.response.length(), 300);
             for (size_t i = 0; i < previewLength; ++i)
+                Serial.write(result.response[i]);
+            Serial.println();
+            const size_t tailLength = std::min<size_t>(result.response.length(), 100);
+            Serial.printf("[WARN] OpenSky raw response tail (%u chars): ",
+                          static_cast<unsigned int>(tailLength));
+            for (size_t i = result.response.length() - tailLength;
+                 i < result.response.length();
+                 ++i)
                 Serial.write(result.response[i]);
             Serial.println();
             LogParseFailure("OpenSky", error, "missing states array");

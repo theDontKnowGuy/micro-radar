@@ -34,6 +34,7 @@ namespace {
 // One tag for the whole firmware. The dashboard groups by tag, and splitting
 // per module would scatter a single crash's story across several groups.
 constexpr const char* TAG = "radar";
+constexpr bool EnableReportingForTesting = true;
 
 // Long enough for any message here; anything longer is truncated rather than
 // allowed to cost a heap allocation on a path that runs during failures, which
@@ -54,8 +55,8 @@ String nodeId;
 // now occupies those bytes and the server answers 403 -- forever, and at the
 // transport's retry rate rather than its reporting interval, which is how a
 // mistake this small turns into the flood that TransportIsFlooding() below
-// exists to stop. The same caution applies to the label: it is handed to the
-// diagnostics store as a bare pointer.
+// exists to stop. The key is retained for the same reason: the transport keeps
+// a pointer to it rather than copying it.
 String storedAuthKey;
 String storedLabel;
 
@@ -269,20 +270,6 @@ void StopAgent()
         xSemaphoreGive(storeMutex);
 }
 
-// Declares one of this firmware's dashboard variables, and says so when it
-// cannot.
-//
-// The return value is worth a line because the failure is otherwise silent.
-// The table holds CONFIG_DIAG_VARIABLES_MAX_COUNT entries -- 20, shared with
-// the ones the network stack registers for itself. If registration fails, the
-// symptom on the dashboard is a device that quietly appears as an unlabelled
-// MAC address, which looks like a different fault entirely.
-void RegisterVariable(const char* key, const char* label)
-{
-    if (!Insights.variables.addString("radar", key, label, "device"))
-        Serial.printf("Diagnostics: could not register the '%s' variable\n", key);
-}
-
 // Brings the agent up once during boot. A transport storm disables it until the
 // next boot rather than repeatedly tearing down and rebuilding its stores.
 //
@@ -296,27 +283,14 @@ bool StartAgent()
     const bool useExternalRam = ESP.getPsramSize() > 0;
 
     // Node id left null so the agent uses the Wi-Fi MAC, which is unique
-    // without anyone having to keep a list. The human label is attached below
-    // as a variable instead -- two friends both typing "living room" would
-    // otherwise merge into one device on the dashboard.
+    // without anyone having to keep a list. The optional human label is sent
+    // in the boot event rather than registered as a string variable: variable
+    // values allocate from the scarce internal heap.
     if (!Insights.begin(storedAuthKey.c_str(), nullptr, 0xFFFFFFFF, useExternalRam))
         return false;
 
     started = true;
     nodeId = Insights.nodeID();
-
-    // Shown beside each device on the dashboard. Without it, twenty radars are
-    // twenty MAC addresses and no way to tell whose is crashing.
-    if (!storedLabel.isEmpty()) {
-        RegisterVariable("label", "Label");
-        Insights.variables.setString("label", storedLabel.c_str());
-    }
-
-    // So a crash can be read against the build it came from. The dashboard
-    // groups by version, which is what turns "it crashes sometimes" into "it
-    // started crashing in 1.7.0".
-    RegisterVariable("fw", "Firmware");
-    Insights.variables.setString("fw", FIRMWARE_VERSION);
 
     // Begin with an empty failure window.
     ResetTransportWindow();
@@ -356,6 +330,8 @@ void Begin(ConfigurationWebServer& config)
     const esp_reset_reason_t resetReason = esp_reset_reason();
 
 #ifdef CONFIG_ESP_INSIGHTS_ENABLED
+    if (!EnableReportingForTesting)
+        return;
     storedAuthKey = config.GetStoredString("insights-key");
     storedAuthKey.trim();
 
@@ -375,9 +351,7 @@ void Begin(ConfigurationWebServer& config)
     if (storeMutex == nullptr)
         Serial.println("Diagnostics: no mutex for the event store - teardown is unguarded");
 
-    // Read before the agent starts because StartAgent() declares it as a
-    // variable, and is kept in a String that outlives this call for the reason
-    // at the top of this file.
+    // Keep the label for the boot event in a String that outlives this call.
     storedLabel = config.GetStoredString("insights-label");
     storedLabel.trim();
 
@@ -393,8 +367,12 @@ void Begin(ConfigurationWebServer& config)
     // The first thing every boot reports, and the one that makes a crash loop
     // legible: a device whose events are a column of "panic" is telling a very
     // different story from one that reads "power-on".
-    Event("boot", "#%u v%s, reset: %s",
-          RecordBoot(), FIRMWARE_VERSION, ResetReasonName(resetReason));
+    Event("boot", "#%u v%s, reset: %s%s%s",
+          RecordBoot(),
+          FIRMWARE_VERSION,
+          ResetReasonName(resetReason),
+          storedLabel.isEmpty() ? "" : ", label: ",
+          storedLabel.isEmpty() ? "" : storedLabel.c_str());
 
     // Armed rather than sent, and Poll() does it -- see firstSendPending. It
     // still goes out within milliseconds of the first pass of whichever loop
