@@ -15,10 +15,11 @@ class ConfigurationWebServer;
 // diagnostics service and, usefully, is already compiled into the Arduino core
 // we build against: libesp_insights.a, libesp_diagnostics.a and librtc_store.a
 // all ship in the esp32s3 SDK, so this costs a header and no new dependency.
-// The agent posts over HTTPS every 60-240 seconds -- there is no persistent
-// socket, which matters on a board with a history of "SSL - Memory allocation
-// failed" -- and on a panic it reports the exception cause, the registers and
-// the backtrace from the coredump the panic handler already writes to flash.
+// The agent posts over HTTPS every 60-240 seconds. Its transport shares the
+// firmware-wide TLS admission mutex with the application clients, so only one
+// TLS operation can consume the internal heap at a time. On a panic it reports
+// the exception cause, registers and backtrace from the coredump the panic
+// handler already writes to flash.
 //
 // What it gives you, per device, on a web dashboard:
 //   * crashes, with the line of code that died
@@ -59,14 +60,14 @@ void Begin(ConfigurationWebServer& config);
 [[nodiscard]] String NodeId();
 
 // Call once per pass of the render loop, and from any loop in setup() that runs
-// for long enough to matter. Cheap -- two atomic loads in the common case.
+// for long enough to matter. Cheap -- atomic checks in the common case.
 //
 // It does three things, all of which have to happen somewhere that is running
 // often rather than on the agent's own task:
 //
 //   * sends the first report, which Begin() arms rather than performs;
-//   * shuts the agent down if its transport has started failing in bursts;
-//   * brings it back, on a doubling delay, once one has.
+//   * permanently disables the agent for this boot if its transport starts
+//     failing in bursts.
 //
 // The shutdown is not a tidiness measure. Every retry the transport makes is a
 // fresh TLS handshake, and a router with no working internet behind it makes
@@ -88,14 +89,9 @@ void Begin(ConfigurationWebServer& config);
 // receive timeout is the same two seconds. On the render loop that is a frozen
 // sweep for the duration.
 //
-// It buys a bounded cost in place of an unbounded one -- the alternative is the
-// storm running until something else fails -- but the arithmetic changed when
-// the restart went in. It used to be paid once per boot; a device whose key is
-// genuinely rejected now pays it at t+5, +15, +35 and +75 minutes and then
-// hourly, each time preceded by a short deliberate burst of failed handshakes
-// in whatever heap AircraftManager is using. The burst is about a fifth of a
-// second at the rate these arrive, so the trade holds, but a caller adding a
-// third loop that pumps this should know it is not free.
+// It buys a bounded cost in place of an unbounded one. The shutdown is paid at
+// most once per boot; changing a bad key through the configuration page reboots
+// the radar and gives the corrected agent a fresh start.
 void Poll();
 
 // Stops the agent before a firmware install. The download wants the only TLS

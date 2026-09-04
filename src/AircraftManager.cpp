@@ -181,6 +181,8 @@ constexpr int CLOCK_COLOR_B = 0;
 #include <algorithm>
 #include <set>
 
+#include "NetworkTls.h"
+
 namespace {
 
 bool IsSuccessful(const HttpResult& result)
@@ -576,6 +578,8 @@ bool AircraftManager::ScheduleLabelLayout(const std::vector<RenderAircraft>& air
 
 void AircraftManager::RunAircraftFetch()
 {
+    NetworkTls::Guard tlsGuard;
+    NetworkTls::HeapScope heapScope("FETCH", "OpenSky aircraft flow");
     // Set by every path below that ends without aircraft, in the words the panel
     // draws. Empty means the fetch worked, which is also how the notice clears.
     String failure;
@@ -674,7 +678,19 @@ void AircraftManager::RunAircraftFetch()
         if (!error && doc["states"].is<JsonArray>()) {
             fetchedAircraft = JsonParser::ParseArray<Aircraft>(doc["states"]);
             fetchSucceeded = true;
+        } else if (!error && doc["states"].isNull()) {
+            // OpenSky uses null when no state vectors are available in the
+            // requested area. That is a valid empty result, not bad data.
+            fetchedAircraft.clear();
+            fetchSucceeded = true;
         } else {
+            Serial.printf("[WARN] OpenSky HTTP %d response length %u, body: ",
+                          result.statusCode,
+                          static_cast<unsigned int>(result.response.length()));
+            const size_t previewLength = std::min<size_t>(result.response.length(), 300);
+            for (size_t i = 0; i < previewLength; ++i)
+                Serial.write(result.response[i]);
+            Serial.println();
             LogParseFailure("OpenSky", error, "missing states array");
             failure = "OpenSky sent bad data";
         }
@@ -764,6 +780,8 @@ void AircraftManager::ReportFetchStatus(const String& failure)
 
 void AircraftManager::RunWindFetch()
 {
+    NetworkTls::Guard tlsGuard;
+    NetworkTls::HeapScope heapScope("FETCH", "weather flow");
     const HttpResult result = http.Get(
         "https://api.open-meteo.com/v1/forecast",
         {
@@ -849,6 +867,8 @@ void AircraftManager::RunWindFetch()
 
 void AircraftManager::RunTimezoneFetch()
 {
+    NetworkTls::Guard tlsGuard;
+    NetworkTls::HeapScope heapScope("FETCH", "timezone flow");
     // The same host the wind comes from, asked for the one field the clock
     // needs. `timezone=auto` is what makes the answer the zone the coordinates
     // fall in; `current=is_day` is the smallest reading that will persuade the
@@ -897,6 +917,8 @@ void AircraftManager::RunTimezoneFetch()
 
 void AircraftManager::RunDestinationLookup(const String& icao, const String& callsign)
 {
+    NetworkTls::Guard tlsGuard;
+    NetworkTls::HeapScope heapScope("FETCH", "destination flow");
     String safeCallsign;
     safeCallsign.reserve(callsign.length());
     for (size_t i = 0; i < callsign.length(); ++i) {

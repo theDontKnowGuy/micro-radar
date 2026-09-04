@@ -8,6 +8,7 @@
 #include "FirmwareVersion.h"
 #include "HttpRequestManager.h"
 #include "LGFX.h"
+#include "NetworkTls.h"
 #include "OpenSkyAuthTokenHandler.h"
 #include "WiFiConnection.h"
 #include "ui/AlignmentScreen.h"
@@ -108,6 +109,10 @@ void setup()
   //delay(5000); // avoids immediate serial output being cut off - uncomment if needed
   Serial.printf("Starting Micro-Radar by Artisian Electronics, v" FIRMWARE_VERSION "\n");
   Serial.printf("Reset reason: %d\n", esp_reset_reason());
+
+  // Before Diagnostics and FirmwareUpdater create their background workers.
+  // Every outbound HTTPS path uses this same admission gate.
+  NetworkTls::Begin();
   
   // initialise LGFX + screen
   tft.init();
@@ -301,11 +306,11 @@ void loop()
   // Below the update check and above the alignment return, and both halves of
   // that matter.
   //
-  // Below, because Poll() can restart a stood-down agent, and a restart on the
-  // pass that is about to call PauseForUpdate() would pay for an agent init and
-  // its multi-second teardown to accomplish nothing. Above, because a radar
-  // left in alignment mode still has a network stack to protect, and that path
-  // returns before it would reach anything further down.
+  // Below, because Poll() can queue the initial report, and doing that on the
+  // pass that is about to call PauseForUpdate() would make teardown wait for an
+  // upload that accomplishes nothing. Above, because a radar left in alignment
+  // mode still has a network stack to protect, and that path returns before it
+  // would reach anything further down.
   //
   // Reporting is the first thing to give way when it starts costing more than
   // it is worth -- see Diagnostics::Poll().

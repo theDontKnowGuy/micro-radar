@@ -14,17 +14,20 @@
 #include <cstring>
 
 #include <Preferences.h>
-#include <WiFi.h>
 #include <esp_log.h>
 #include <esp_system.h>
 #include <sdkconfig.h>
 
 #include "ConfigurationWebServer.h"
 #include "FirmwareVersion.h"
+#include "NetworkTls.h"
 
 #ifdef CONFIG_ESP_INSIGHTS_ENABLED
 #include <Insights.h>
+#include <esp_insights.h>
 #include <esp_rmaker_work_queue.h>
+
+extern "C" esp_insights_transport_config_t g_default_insights_transport_https;
 #endif
 
 namespace {
@@ -73,7 +76,7 @@ std::atomic<unsigned long> transportWindowStartedAt{0};
 // Raised by the log hook, lowered by Poll() when it shuts the agent down.
 std::atomic<bool> transportFlooded{false};
 
-// Armed by Begin() (or by a restart below) and consumed by the next Poll().
+// Armed by Begin() and consumed by the next Poll().
 //
 // A tidiness measure, and worth being honest about how little it buys: the
 // thing that fixed the ten-second unsupervised storm is the Poll() pump around
@@ -93,12 +96,6 @@ std::atomic<bool> firstSendPending{false};
 // network task writes through the pointer that has just been NULLed. That is
 // the same StoreProhibited this file already documents for rmaker_queue_ta.
 //
-// The race is not new, but the exposure is: teardown used to happen at most
-// once per boot, and the one place it happened with other tasks running had
-// already suspended them. The restart below makes it a recurring event on a
-// live device, which turns a narrow window into one that will eventually be
-// hit.
-//
 // It does not close the window completely, and nothing in this file can. Warn()
 // and Error() reach the store through the IDF's own esp_log_write, which the
 // Insights build wraps at link time -- that path is inside the library and
@@ -112,38 +109,6 @@ std::atomic<bool> firstSendPending{false};
 // use-after-free this exists to prevent.
 SemaphoreHandle_t storeMutex = nullptr;
 
-// Restart bookkeeping, touched only from Poll() and Begin() -- both on the
-// Arduino loop task -- so plain variables are enough.
-//
-// The stop used to be final until someone power-cycled the radar. That was
-// tolerable while it took a sustained storm to trigger; now that the detector
-// actually fires, the common case it fires on is a router that has not got its
-// upstream back yet at the moment the radar boots, and answering a thirty
-// second outage by disabling reporting until the next reboot is not a good
-// trade for a device on someone else's shelf.
-//
-// So the agent comes back, on a doubling delay: five minutes, ten, twenty, up
-// to an hour. If the internet is genuinely gone, the cost settles at one short
-// burst an hour rather than a permanent one; if it was a blip, reporting
-// resumes on its own.
-bool restartScheduled = false;
-unsigned long agentStoppedAt = 0;
-unsigned long agentStartedAt = 0;
-constexpr unsigned long FirstRestartDelayMs = 5UL * 60UL * 1000UL;
-constexpr unsigned long MaxRestartDelayMs = 60UL * 60UL * 1000UL;
-unsigned long restartDelayMs = FirstRestartDelayMs;
-
-// How long the agent has to run without storming before the doubling above is
-// forgiven. Without it the delay only ever grows, so a unit that meets four
-// unrelated blips over a couple of months is on the one-hour delay for the rest
-// of its life -- which is the permanent shutdown this restart was written to
-// avoid, arrived at slowly instead of at once.
-//
-// Half an hour is several of the agent's own 60-240 second reporting cycles, so
-// a run that reaches it has demonstrably been uploading rather than merely
-// sitting there between failures.
-constexpr unsigned long StableRunMs = 30UL * 60UL * 1000UL;
-
 // A burst is this many transport errors inside this window. Chosen against an
 // observed failure: a rejected key produced errors roughly five times a second,
 // so twenty in a minute is far above anything intermittent and is reached in
@@ -151,8 +116,7 @@ constexpr unsigned long StableRunMs = 30UL * 60UL * 1000UL;
 constexpr uint32_t TransportErrorBurst = 20;
 constexpr unsigned long TransportErrorWindowMs = 60000;
 
-// Puts the burst count back to nothing, so that a restarted agent is judged on
-// what it does next rather than on the errors that stopped the last one.
+// Starts the agent with a clean failure window.
 void ResetTransportWindow()
 {
     transportErrors.store(0);
@@ -255,6 +219,35 @@ uint32_t RecordBoot()
 }
 
 #ifdef CONFIG_ESP_INSIGHTS_ENABLED
+esp_err_t InsightsTransportInit(void* userdata)
+{
+    const auto callback = g_default_insights_transport_https.callbacks.init;
+    return callback != nullptr ? callback(userdata) : ESP_OK;
+}
+
+void InsightsTransportDeinit()
+{
+    const auto callback = g_default_insights_transport_https.callbacks.deinit;
+    if (callback != nullptr)
+        callback();
+}
+
+int InsightsTransportDataSend(void* data, size_t length)
+{
+    NetworkTls::Guard tlsGuard;
+    constexpr const char* endpoint = "https://client.insights.espressif.com";
+    NetworkTls::LogHeap("Before request", "POST", endpoint);
+
+    const auto callback = g_default_insights_transport_https.callbacks.data_send;
+    const int result = callback != nullptr ? callback(data, length) : -1;
+
+    // The bundled transport owns its client handle; this is after its
+    // synchronous transfer, without claiming that its reusable handle was
+    // destroyed here.
+    NetworkTls::LogHeap("After request", "POST", endpoint);
+    return result;
+}
+
 // Shuts the agent down without pulling the rug out from under its own task.
 //
 // esp_insights_deinit() tears down in the wrong order for an agent that is
@@ -306,26 +299,19 @@ void StopAgent()
 // Declares one of this firmware's dashboard variables, and says so when it
 // cannot.
 //
-// The return value is worth a line because the failure is silent and the
-// restart path is what could produce it. The table holds
-// CONFIG_DIAG_VARIABLES_MAX_COUNT entries -- 20, shared with the ones the
-// network stack registers for itself -- and it is freed and rebuilt on every
-// restart. esp_insights_disable() does call esp_diag_variables_deinit(), so a
-// cycle that leaked entries would be a library bug rather than one of ours; the
-// point of noticing is that if it ever happens, the symptom on the dashboard is
-// a device that quietly goes back to being an unlabelled MAC address, which
-// looks like a different fault entirely.
+// The return value is worth a line because the failure is otherwise silent.
+// The table holds CONFIG_DIAG_VARIABLES_MAX_COUNT entries -- 20, shared with
+// the ones the network stack registers for itself. If registration fails, the
+// symptom on the dashboard is a device that quietly appears as an unlabelled
+// MAC address, which looks like a different fault entirely.
 void RegisterVariable(const char* key, const char* label)
 {
     if (!Insights.variables.addString("radar", key, label, "device"))
         Serial.printf("Diagnostics: could not register the '%s' variable\n", key);
 }
 
-// Brings the agent up, and is called for the first start and for every restart
-// after a storm. Everything here has to be redone on a restart rather than only
-// on the first start: Insights.end() frees the variable table along with the
-// rest of the diagnostics store, so a resumed agent that did not re-declare
-// these would report as an unlabelled node on an unknown firmware version.
+// Brings the agent up once during boot. A transport storm disables it until the
+// next boot rather than repeatedly tearing down and rebuilding its stores.
 //
 // Deliberately does not send. The caller arms firstSendPending instead, so the
 // upload happens on the next Poll() with the burst detector already watching.
@@ -340,11 +326,23 @@ bool StartAgent()
     // without anyone having to keep a list. The human label is attached below
     // as a variable instead -- two friends both typing "living room" would
     // otherwise merge into one device on the dashboard.
-    if (!Insights.begin(storedAuthKey.c_str(), nullptr, 0xFFFFFFFF, useExternalRam))
+    // Keep Espressif's HTTPS implementation and endpoint, but interpose on its
+    // synchronous send callback so it takes the same TLS admission mutex as
+    // OpenSky, weather, destination and OTA calls.
+    esp_insights_transport_config_t transport = {};
+    transport.callbacks.init = InsightsTransportInit;
+    transport.callbacks.deinit = InsightsTransportDeinit;
+    transport.callbacks.data_send = InsightsTransportDataSend;
+    transport.userdata = const_cast<char*>(storedAuthKey.c_str());
+    if (esp_insights_transport_register(&transport) != ESP_OK)
         return false;
 
+    if (!Insights.begin(storedAuthKey.c_str(), nullptr, 0xFFFFFFFF, useExternalRam, false)) {
+        esp_insights_transport_unregister();
+        return false;
+    }
+
     started = true;
-    agentStartedAt = millis();
     nodeId = Insights.nodeID();
 
     // Shown beside each device on the dashboard. Without it, twenty radars are
@@ -360,9 +358,7 @@ bool StartAgent()
     RegisterVariable("fw", "Firmware");
     Insights.variables.setString("fw", FIRMWARE_VERSION);
 
-    // A restarted agent starts its burst count from nothing. Without this the
-    // errors that stopped it are still in the window, and the first failure
-    // after the restart would trip the detector again immediately.
+    // Begin with an empty failure window.
     ResetTransportWindow();
     return true;
 }
@@ -461,91 +457,23 @@ bool Enabled()
 void Poll()
 {
 #ifdef CONFIG_ESP_INSIGHTS_ENABLED
-    if (started) {
-        // Before the flood check rather than after it, so that a send which
-        // turns into a storm is stopped by the very next pass rather than
-        // sitting unqueued behind one.
-        //
-        // exchange() so this happens once even if two callers race -- the
-        // OpenSky hold loop and loop() are different loops, not concurrent
-        // ones, but the flag is also written from Begin() and a plain
-        // load-then-store would be the kind of thing that only misbehaves in
-        // the field.
-        if (firstSendPending.exchange(false))
-            Insights.send();
-
-        if (!transportFlooded.load()) {
-            // A run this long has been through several of the agent's own
-            // 60-240 second reporting cycles without complaint, so whatever
-            // stopped it last time is over and the escalated delay it earned
-            // should not be charged against the next unrelated blip. See
-            // StableRunMs.
-            if (restartDelayMs != FirstRestartDelayMs &&
-                millis() - agentStartedAt > StableRunMs)
-                restartDelayMs = FirstRestartDelayMs;
-
-            return;
-        }
-
-        transportFlooded.store(false);
-
-        // Straight to Serial. Error() would route this through the log hook that
-        // just tripped, and a shutdown notice is not worth another lap through the
-        // machinery that is being shut down.
-        Serial.println("Diagnostics: transport failing repeatedly - stopping the agent");
-        Serial.printf("Diagnostics: retrying in %lu minutes - if this repeats, check the auth key"
-                      " on the configuration page\n",
-                      restartDelayMs / 60000UL);
-
-        StopAgent();
-
-        restartScheduled = true;
-        agentStoppedAt = millis();
-        return;
-    }
-
-    // Not running. Either it never started -- no key, or a key the agent
-    // refused, neither of which a retry would change -- or a storm stopped it
-    // and it is waiting out the delay.
-    if (!restartScheduled)
+    if (!started)
         return;
 
-    if (millis() - agentStoppedAt < restartDelayMs)
+    // exchange() so the boot upload is queued once even if this gains another
+    // caller in future.
+    if (firstSendPending.exchange(false))
+        Insights.send();
+
+    if (!transportFlooded.exchange(false))
         return;
 
-    // Ahead of the backoff below, and that order is the whole point: a radar
-    // with no network has not tried anything, so it has nothing to back off
-    // from. Charging it anyway walked the delay from five minutes to the hour
-    // cap in about two hours of downtime, and left reporting dark for up to
-    // another hour after the router came back -- an outage extending its own
-    // recovery, which is the opposite of what a backoff is for.
-    //
-    // The storm case -- associated, but nothing reachable behind the router --
-    // looks connected here, which is why the retry exists rather than this
-    // check standing in for it. Cheap enough to run per pass: WiFi.status() is
-    // a read of an event group bit.
-    if (WiFi.status() != WL_CONNECTED)
-        return;
-
-    // Charged now that a restart is genuinely being attempted. Doubled here
-    // rather than at the stop so the delay charged is the one that was
-    // announced.
-    const unsigned long nextDelay = restartDelayMs * 2;
-    restartDelayMs = nextDelay > MaxRestartDelayMs ? MaxRestartDelayMs : nextDelay;
-    agentStoppedAt = millis();
-
-    Serial.println("Diagnostics: restarting the reporting agent");
-
-    if (!StartAgent()) {
-        Serial.println("Diagnostics: agent would not restart - waiting again");
-        return;
-    }
-
-    // Distinct from "boot" on purpose: this is the event that says a gap in a
-    // device's history was an outage rather than a device that was switched
-    // off, which is the question anyone reading a sparse timeline asks first.
-    Event("insights", "reporting resumed after transport failures");
-    firstSendPending.store(true);
+    // Keep the storm circuit breaker, but do not repeatedly tear down and
+    // reconstruct the agent. A bad key or unreachable endpoint stays disabled
+    // until reboot/settings change; ordinary successful uploads are serialized
+    // with application TLS by InsightsTransportDataSend().
+    Serial.println("Diagnostics: transport failing repeatedly - disabling until reboot");
+    StopAgent();
 #endif
 }
 
@@ -574,14 +502,6 @@ void PauseForUpdate()
     Insights.send();
     StopAgent();
 
-    // Cancelled belt-and-braces rather than because anything can currently act
-    // on it: every caller follows this with UpdateScreen::RunFirmwareUpdate(),
-    // which blocks until it reboots on both the success and the failure path
-    // and never calls Poll(). So there is no pass of any loop between here and
-    // the reset in which a restart could fire. The line costs nothing and means
-    // a future caller that does return here cannot bring the agent back up on
-    // top of a flash write.
-    restartScheduled = false;
 #endif
 }
 

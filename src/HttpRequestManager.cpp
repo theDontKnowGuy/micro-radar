@@ -1,5 +1,10 @@
 #include "HttpRequestManager.h"
 
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
+
+#include "NetworkTls.h"
+
 namespace {
 
 // HTTPClient's own default -- both for the initial TCP connect and for the
@@ -59,9 +64,20 @@ HttpResult HttpRequestManager::Get(const String& url, const std::vector<std::pai
     const String queryParams = BuildQueryString(params);
     const String fullUrl = url + queryParams;
 
-    http.begin(fullUrl);
+    NetworkTls::Guard tlsGuard;
+    WiFiClientSecure client;
+    // Preserves the old begin(url) behaviour. Pinning roots for these public
+    // APIs is a separate trust-policy change.
+    client.setInsecure();
+
+    HTTPClient http;
+    http.setReuse(false);
     http.setTimeout(HTTP_TIMEOUT_MS);
     http.setConnectTimeout(HTTP_TIMEOUT_MS);
+    if (!http.begin(client, fullUrl)) {
+        result.errorMessage = "could not open connection";
+        return result;
+    }
 
     // add headers to request
     for (const auto& header : headers) {
@@ -69,12 +85,15 @@ HttpResult HttpRequestManager::Get(const String& url, const std::vector<std::pai
     }
 
     // send request and handle response
+    NetworkTls::LogHeap("Before request", "GET", fullUrl.c_str());
     int responseCode = http.GET();
+    NetworkTls::LogHeap("After request", "GET", fullUrl.c_str());
     result.statusCode = responseCode;
 
     if (responseCode > 0) {
         result.success = true;
         result.response = http.getString();
+        NetworkTls::LogHeap("After response", "GET", fullUrl.c_str());
     }
     else {
         result.success = false;
@@ -86,6 +105,8 @@ HttpResult HttpRequestManager::Get(const String& url, const std::vector<std::pai
     }
 
     http.end();
+    client.stop();
+    NetworkTls::LogHeap("After close", "GET", fullUrl.c_str());
     return result;
 }
 
@@ -93,9 +114,18 @@ HttpResult HttpRequestManager::Post(const String& url, const String& body, const
 {
     HttpResult result{ false, 0, "", "" };
 
-    http.begin(url);
+    NetworkTls::Guard tlsGuard;
+    WiFiClientSecure client;
+    client.setInsecure();
+
+    HTTPClient http;
+    http.setReuse(false);
     http.setTimeout(HTTP_TIMEOUT_MS);
     http.setConnectTimeout(HTTP_TIMEOUT_MS);
+    if (!http.begin(client, url)) {
+        result.errorMessage = "could not open connection";
+        return result;
+    }
 
     // add headers to request
     for (const auto& header : headers) {
@@ -103,12 +133,15 @@ HttpResult HttpRequestManager::Post(const String& url, const String& body, const
     }
 
     // send request and handle response
+    NetworkTls::LogHeap("Before request", "POST", url.c_str());
     int responseCode = http.POST(body);
+    NetworkTls::LogHeap("After request", "POST", url.c_str());
     result.statusCode = responseCode;
 
     if (responseCode > 0) {
         result.success = true;
         result.response = http.getString();
+        NetworkTls::LogHeap("After response", "POST", url.c_str());
     }
     else {
         result.success = false;
@@ -120,5 +153,7 @@ HttpResult HttpRequestManager::Post(const String& url, const String& body, const
     }
 
     http.end();
+    client.stop();
+    NetworkTls::LogHeap("After close", "POST", url.c_str());
     return result;
 }

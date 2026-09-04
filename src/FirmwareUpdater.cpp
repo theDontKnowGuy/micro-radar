@@ -8,10 +8,12 @@
 #include <algorithm>
 #include <esp_ota_ops.h>
 #include <esp_partition.h>
+#include <esp_heap_caps.h>
 #include <esp_rom_crc.h>
 #include <esp_spi_flash.h>
 #include <mbedtls/sha256.h>
 
+#include "NetworkTls.h"
 #include "FirmwareVersion.h"
 #include "UpdateRootCAs.h"
 
@@ -333,11 +335,15 @@ void FirmwareUpdater::RequestCheckNow()
 
 void FirmwareUpdater::CheckForUpdate()
 {
+    NetworkTls::Guard tlsGuard;
+    NetworkTls::HeapScope heapScope("GET", "firmware manifest flow");
+
     WiFiClientSecure client;
     client.setCACert(UpdateRootCAs::GitHubRoots);
     client.setTimeout(HTTP_TIMEOUT_MS / 1000);  // seconds, unlike HTTPClient's
 
     HTTPClient http;
+    http.setReuse(false);
     http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
     http.setTimeout(HTTP_TIMEOUT_MS);
     http.setConnectTimeout(HTTP_TIMEOUT_MS);
@@ -347,7 +353,9 @@ void FirmwareUpdater::CheckForUpdate()
         return;
     }
 
+    NetworkTls::LogHeap("Before request", "GET", MANIFEST_URL);
     const int status = http.GET();
+    NetworkTls::LogHeap("After request", "GET", MANIFEST_URL);
     if (status != HTTP_CODE_OK) {
         // A 404 here is the normal state of a repo that has no releases yet, so
         // this is a warning rather than an error.
@@ -363,7 +371,10 @@ void FirmwareUpdater::CheckForUpdate()
     }
 
     const String payload = http.getString();
+    NetworkTls::LogHeap("After response", "GET", MANIFEST_URL);
     http.end();
+    client.stop();
+    NetworkTls::LogHeap("After close", "GET", MANIFEST_URL);
 
     JsonDocument doc;
     const DeserializationError error = deserializeJson(doc, payload);
@@ -489,6 +500,9 @@ FirmwareUpdater::Release FirmwareUpdater::PendingRelease() const
 
 bool FirmwareUpdater::Install(const Release& release, const ProgressCallback& onProgress)
 {
+    NetworkTls::Guard tlsGuard;
+    NetworkTls::HeapScope heapScope("GET", "firmware install flow");
+
     Serial.printf("[OTA] Installing %s from %s\n", release.version.c_str(), release.url.c_str());
 
     WiFiClientSecure client;
@@ -496,6 +510,7 @@ bool FirmwareUpdater::Install(const Release& release, const ProgressCallback& on
     client.setTimeout(HTTP_TIMEOUT_MS / 1000);  // seconds, unlike HTTPClient's
 
     HTTPClient http;
+    http.setReuse(false);
     http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
     http.setTimeout(HTTP_TIMEOUT_MS);
     http.setConnectTimeout(HTTP_TIMEOUT_MS);
@@ -510,7 +525,9 @@ bool FirmwareUpdater::Install(const Release& release, const ProgressCallback& on
         return Abandon();
     }
 
+    NetworkTls::LogHeap("Before request", "GET", release.url.c_str());
     const int status = http.GET();
+    NetworkTls::LogHeap("After request", "GET", release.url.c_str());
     if (status != HTTP_CODE_OK) {
         SetStatus(Status::Failed, "firmware download returned HTTP " + String(status));
         http.end();
@@ -611,8 +628,9 @@ bool FirmwareUpdater::Install(const Release& release, const ProgressCallback& on
                       "Downloading " + release.version + " - " + String(percent) + " percent");
         }
     }
-
     http.end();
+    client.stop();
+    NetworkTls::LogHeap("After close", "GET", release.url.c_str());
 
     if (written != total) {
         if (!recordedFailure)
