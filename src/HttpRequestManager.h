@@ -1,6 +1,6 @@
 #pragma once
 
-#include <HTTPClient.h>
+#include <Arduino.h>
 #include <vector>
 
 struct HttpResult {
@@ -13,8 +13,6 @@ struct HttpResult {
 class HttpRequestManager
 {
 private:
-    HTTPClient http;
-
     String BuildQueryString(const std::vector<std::pair<String, String>>& params) const;
 
 public:
